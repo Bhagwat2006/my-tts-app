@@ -12,6 +12,46 @@ import edge_tts
 from gtts import gTTS
 import io
 import pandas as pd
+import streamlit as st
+from supabase import create_client, Client
+
+# --- SUPABASE CONNECTION ---
+# Add these to Streamlit Cloud -> Settings -> Secrets
+# SUPABASE_URL = "your_project_url"
+# SUPABASE_KEY = "your_api_key"
+
+url = st.secrets["https://tipnrzvalmbgyegrwxxr.supabase.co"]
+key = st.secrets["sb_publishable_GNV3cJIH9dX7PI0p9id6hw_RUQVsfUd"]
+supabase: Client = create_client(url, key)
+
+# --- REPLACING SQLITE WITH SUPABASE ---
+
+def save_user_to_supabase(u, p_hash, e):
+    # This replaces: conn.execute("INSERT INTO users...")
+    data = {
+        "username": u,
+        "password": p_hash,
+        "email": e,
+        "plan": "Basic",
+        "usage_count": 0,
+        "receipt_id": "NONE"
+    }
+    try:
+        supabase.table("users").insert(data).execute()
+        st.success("User saved to Cloud Database!")
+    except Exception as e:
+        st.error(f"Error saving to Supabase: {e}")
+
+def get_user_from_supabase(u):
+    # This replaces: c.execute("SELECT * FROM users...")
+    response = supabase.table("users").select("*").eq("username", u).execute()
+    return response.data[0] if response.data else None
+
+def update_usage_supabase(username):
+    # This replaces: UPDATE users SET usage_count...
+    current_user = get_user_from_supabase(username)
+    new_count = current_user['usage_count'] + 1
+    supabase.table("users").update({"usage_count": new_count}).eq("username", username).execute()
 
 # --- CONFIGURATION ---
 ADMIN_PASSWORD = "ADMIN@123" # इसे अपनी जरूरत के अनुसार बदलें
@@ -102,7 +142,7 @@ if not st.session_state.user:
     if choice == "Sign Up":
         u = st.text_input("Username")
         e = st.text_input("Email")
-        p = st.text_input("Password (8 chars)", type="password", max_chars=8)
+        p = st.text_input("Password (8 chars)", type="password", max_chars=16)
         if st.button("Register"):
             if len(p) < 8: st.error("Password must be 8 characters.")
             else:
@@ -254,3 +294,4 @@ else:
                 </div>
                 """, unsafe_allow_html=True)
             else: st.write("No paid invoices.")
+
