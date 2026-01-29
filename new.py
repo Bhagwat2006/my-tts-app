@@ -1,8 +1,7 @@
 import os
 import sqlite3
-import hashlib
+import bcrypt  # Replaced hashlib
 import uuid
-import datetime
 from datetime import datetime, timedelta
 import streamlit as st
 import streamlit.components.v1 as components
@@ -85,10 +84,10 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (username TEXT PRIMARY KEY, password TEXT, email TEXT, 
+                  (username TEXT PRIMARY KEY, password TEXT, email TEXT, 
                   plan TEXT, expiry_date TEXT, usage_count INTEGER, receipt_id TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS user_voices 
-                 (username TEXT, voice_name TEXT, voice_id TEXT)''')
+                  (username TEXT, voice_name TEXT, voice_id TEXT)''')
     c.execute("PRAGMA table_info(users)")
     columns = [column[1] for column in c.fetchall()]
     if "receipt_id" not in columns:
@@ -96,25 +95,32 @@ def init_db():
     conn.commit()
     conn.close()
 
+# --- SECURITY UPDATE: BCRYPT ---
 def hash_pass(password):
-    # Ensure consistent hashing by stripping whitespace
-    return hashlib.sha256(str.encode(password.strip()[:8])).hexdigest()
+    """Generates a secure bcrypt hash."""
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(password.strip().encode('utf-8'), salt).decode('utf-8')
+
+def verify_pass(entered_password, stored_hash):
+    """Verifies password against stored bcrypt hash."""
+    try:
+        return bcrypt.checkpw(entered_password.strip().encode('utf-8'), stored_hash.encode('utf-8'))
+    except:
+        return False
 
 def upgrade_plan(username, plan_type):
     receipt_id = f"REC-{uuid.uuid4().hex[:8].upper()}"
     expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE users SET plan=?, expiry_date=?, usage_count=0, receipt_id=? WHERE username=?", 
-                 (plan_type, expiry, receipt_id, username))
+                  (plan_type, expiry, receipt_id, username))
     conn.commit()
     conn.close()
     return receipt_id, expiry
 
-# --- FIX: ROBUST RECOVERY LOGIC ---
 def recover_password(u, e, new_p):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Using LOWER() to prevent case-sensitivity issues during recovery
     c.execute("SELECT * FROM users WHERE LOWER(username)=LOWER(?) AND LOWER(email)=LOWER(?)", (u.strip(), e.strip()))
     user_found = c.fetchone()
     if user_found:
@@ -144,9 +150,9 @@ if not st.session_state.logged_in:
         if auth_action == "Sign Up":
             u = st.text_input("Choose Username").strip()
             e = st.text_input("Email Address").strip()
-            p = st.text_input("Create Password (8 chars)", type="password", max_chars=8).strip()
+            p = st.text_input("Create Password (min 8 chars)", type="password").strip()
             if st.button("Initialize Account"):
-                if u and e and len(p) == 8:
+                if u and e and len(p) >= 8:
                     conn = sqlite3.connect(DB_PATH)
                     try:
                         conn.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?)", (u, hash_pass(p), e, "Free", "N/A", 0, "NONE"))
@@ -156,15 +162,15 @@ if not st.session_state.logged_in:
                         st.error("Username already taken!")
                     finally:
                         conn.close()
-                else: st.warning("Ensure all fields are filled & password is 8 chars.")
+                else: st.warning("Ensure all fields are filled & password is at least 8 chars.")
         
         elif auth_action == "Forgot Password":
             st.subheader("Neural Recovery")
             u_rec = st.text_input("Target Username").strip()
             e_rec = st.text_input("Registered Email").strip()
-            new_p = st.text_input("New Password (8 chars)", type="password", max_chars=8).strip()
+            new_p = st.text_input("New Password (min 8 chars)", type="password").strip()
             if st.button("Reset Identity Password"):
-                if u_rec and e_rec and len(new_p) == 8:
+                if u_rec and e_rec and len(new_p) >= 8:
                     if recover_password(u_rec, e_rec, new_p):
                         st.success("Identity Updated! Login now.")
                     else:
@@ -173,14 +179,16 @@ if not st.session_state.logged_in:
 
         else:
             u_log = st.text_input("Username").strip()
-            p_log = st.text_input("Password", type="password", max_chars=8).strip()
+            p_log = st.text_input("Password", type="password").strip()
             if st.button("Authorize Access"):
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
-                c.execute("SELECT * FROM users WHERE LOWER(username)=LOWER(?) AND password=?", (u_log, hash_pass(p_log)))
+                c.execute("SELECT * FROM users WHERE LOWER(username)=LOWER(?)", (u_log,))
                 userData = c.fetchone()
                 conn.close()
-                if userData:
+                
+                # Using the new bcrypt verification logic
+                if userData and verify_pass(p_log, userData[1]):
                     st.session_state.logged_in = True
                     st.session_state.user = userData[0]
                     st.rerun()
@@ -279,7 +287,6 @@ else:
         
         st.divider()
         st.write("### 📲 Instant UPI Payment")
-        # UPDATED: UPI Payment Section to show your number clearly
         st.info(f"Pay to UPI ID / Number: {ADMIN_MOBILE}@ybl")
         upi_link = f"upi://pay?pa={ADMIN_MOBILE}@ybl&pn=AI_Studio_Premium&am=10.00&cu=INR"
         st.image(f"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data={upi_link}")
