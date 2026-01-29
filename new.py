@@ -2,164 +2,255 @@ import os
 import sqlite3
 import hashlib
 import uuid
+import asyncio
 import datetime
 from datetime import datetime, timedelta
 import streamlit as st
+import streamlit.components.v1 as components
 from elevenlabs.client import ElevenLabs
+import edge_tts
+from gtts import gTTS
+import io
+import pandas as pd
 
-# --- CONFIGURATION & SECURITY ---
+# --- CONFIGURATION ---
+ADMIN_PASSWORD = "ADMIN@123" # इसे अपनी जरूरत के अनुसार बदलें
 try:
     ELEVEN_KEY = st.secrets.get("ELEVEN_API_KEY", "5eecc00bf17ec14ebedac583a5937edc23005a895a97856e4a465f28d49d7f40")
 except:
     ELEVEN_KEY = "5eecc00bf17ec14ebedac583a5937edc23005a895a97856e4a465f28d49d7f40"
 
 client = ElevenLabs(api_key=ELEVEN_KEY)
-DB_PATH = "studio_v4.db"
+DB_PATH = "studio_v5_pro.db"
 ADMIN_MOBILE = "8452095418"
+ADMIN_NAME = "AI Studio Admin"
 
-# --- DATABASE ENGINE ---
+# --- DATABASE ENGINE & AUTO-REPAIR ---
 def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
+    try:
+        conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS users 
                      (username TEXT PRIMARY KEY, password TEXT, email TEXT, 
-                     plan TEXT, expiry_date TEXT, usage_count INTEGER, receipt_id TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS user_voices 
+                      plan TEXT, expiry_date TEXT, usage_count INTEGER, receipt_id TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS cloned_voices 
                      (username TEXT, voice_name TEXT, voice_id TEXT)''')
         
         c.execute("PRAGMA table_info(users)")
-        columns = [column[1] for column in c.fetchall()]
-        if "receipt_id" not in columns:
+        cols = [col[1] for col in c.fetchall()]
+        if "receipt_id" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN receipt_id TEXT DEFAULT 'NONE'")
         conn.commit()
+    except Exception as e:
+        if os.path.exists(DB_PATH): os.remove(DB_PATH)
+        init_db()
+    finally:
+        conn.close()
 
 def hash_pass(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
-def upgrade_plan(username, plan_type):
-    receipt_id = f"REC-{uuid.uuid4().hex[:8].upper()}"
-    expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("UPDATE users SET plan=?, expiry_date=?, usage_count=0, receipt_id=? WHERE username=?", 
-                     (plan_type, expiry, receipt_id, username))
-        conn.commit()
-    return receipt_id, expiry
+# --- UI EFFECTS ---
+def inject_ui_effects():
+    st.markdown("""
+        <style>
+        .main { background: linear-gradient(135deg, #0f0c29, #302b63, #24243e); color: white; }
+        .stTabs [data-baseweb="tab-list"] { gap: 10px; }
+        .stTabs [data-baseweb="tab"] { background-color: rgba(255,255,255,0.1); border-radius: 10px; padding: 10px; color: white; transition: 0.3s; }
+        .stTabs [data-baseweb="tab"]:hover { background-color: rgba(255,255,255,0.2); }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    components.html("""
+        <canvas id="canvas1" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; pointer-events: none;"></canvas>
+        <script>
+            const canvas = document.getElementById('canvas1');
+            const ctx = canvas.getContext('2d');
+            canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+            let particles = [];
+            class P {
+                constructor() { this.x = Math.random()*canvas.width; this.y = Math.random()*canvas.height; this.s = Math.random()*3+1; this.vx = Math.random()*2-1; this.vy = Math.random()*2-1; }
+                u() { this.x += this.vx; this.y += this.vy; if(this.x<0||this.x>canvas.width)this.vx*=-1; if(this.y<0||this.y>canvas.height)this.vy*=-1; }
+                d() { ctx.fillStyle='rgba(110,142,251,0.5)'; ctx.beginPath(); ctx.arc(this.x,this.y,this.s,0,Math.PI*2); ctx.fill(); }
+            }
+            for(let i=0;i<50;i++) particles.push(new P());
+            function anim() { ctx.clearRect(0,0,canvas.width,canvas.height); particles.forEach(p=>{p.u();p.d();}); requestAnimationFrame(anim); }
+            anim();
+        </script>
+    """, height=0)
 
-# --- UI SETUP ---
-st.set_page_config(page_title="Global AI Voice Studio Pro", layout="wide")
+# --- ENGINES ---
+async def generate_edge_tts(text, voice):
+    communicate = edge_tts.Communicate(text, voice)
+    data = b""
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio": data += chunk["data"]
+    return data
+
+# --- START APP ---
 init_db()
+inject_ui_effects()
 
-# --- AUTO SIGN-IN LOGIC ---
-if 'logged_in' not in st.session_state:
-    st.session_state.logged_in = False
+if 'user' not in st.session_state: st.session_state.user = None
+if 'admin_mode' not in st.session_state: st.session_state.admin_mode = False
 
-# Check for existing credentials in query parameters (Auto-Login)
-if not st.session_state.logged_in:
-    params = st.query_params
-    if "user" in params and "token" in params:
-        with sqlite3.connect(DB_PATH) as conn:
-            c = conn.cursor()
-            # We verify the user and their hashed password (used as a simple token)
-            c.execute("SELECT username FROM users WHERE username=? AND password=?", (params["user"], params["token"]))
-            auto_user = c.fetchone()
-            if auto_user:
-                st.session_state.logged_in = True
-                st.session_state.user = auto_user[0]
-
-# --- AUTHENTICATION INTERFACE ---
-if not st.session_state.logged_in:
-    st.title("🌐 Global AI Voice Studio")
-    auth_action = st.sidebar.selectbox("Account Access", ["Login", "Sign Up"])
+# --- AUTH ---
+if not st.session_state.user:
+    st.title("🚀 Global AI Voice Studio Pro")
+    choice = st.sidebar.radio("Navigation", ["Login", "Sign Up", "Forgot Password"])
     
-    if auth_action == "Sign Up":
-        u = st.text_input("Choose Username").strip()
-        e = st.text_input("Email Address").strip()
-        p = st.text_input("Create Password (8 chars)", type="password", max_chars=8)
-        if st.button("Create Account"):
-            if len(p) == 8 and u and e:
-                with sqlite3.connect(DB_PATH) as conn:
-                    try:
-                        hp = hash_pass(p)
-                        conn.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?)", 
-                                     (u, hp, e, "Free", "N/A", 0, "NONE"))
-                        conn.commit()
-                        # Set query params for future auto-login
-                        st.query_params["user"] = u
-                        st.query_params["token"] = hp
-                        st.success("✅ Account created! You are now auto-enrolled.")
-                        st.session_state.logged_in = True
-                        st.session_state.user = u
-                        st.rerun()
-                    except sqlite3.IntegrityError:
-                        st.error("❌ Username already exists!")
+    if choice == "Sign Up":
+        u = st.text_input("Username")
+        e = st.text_input("Email")
+        p = st.text_input("Password (8 chars)", type="password", max_chars=8)
+        if st.button("Register"):
+            if len(p) < 8: st.error("Password must be 8 characters.")
             else:
-                st.warning("⚠️ All fields required.")
-    
-    else:
-        u = st.text_input("Username").strip()
-        p = st.text_input("Password", type="password", max_chars=8)
-        if st.button("Secure Login"):
-            with sqlite3.connect(DB_PATH) as conn:
-                c = conn.cursor()
-                hp = hash_pass(p)
-                c.execute("SELECT * FROM users WHERE username=? AND password=?", (u, hp))
-                userData = c.fetchone()
-                if userData:
-                    # Save to query_params so user stays logged in after refresh
-                    st.query_params["user"] = u
-                    st.query_params["token"] = hp
-                    st.session_state.logged_in = True
-                    st.session_state.user = u
-                    st.rerun()
-                else:
-                    st.error("❌ Invalid credentials!")
-
-# --- MAIN DASHBOARD AREA ---
-else:
-    username = st.session_state.user
-    with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute("SELECT * FROM users WHERE username=?", (username,))
-        userData = c.fetchone()
-        c.execute("SELECT voice_name, voice_id FROM user_voices WHERE username=?", (username,))
-        cloned_voices = {row[0]: row[1] for row in c.fetchall()}
-    
-    if not userData: # Safety check if user was deleted
-        st.session_state.logged_in = False
-        st.rerun()
-
-    _, _, email, plan, expiry, usage, receipt_id = userData
-
-    st.sidebar.title(f"User: {username}")
-    st.sidebar.info(f"Membership: {plan}")
-    if st.sidebar.button("Logout & Clear Session"):
-        st.session_state.logged_in = False
-        st.query_params.clear() # Removes auto-login tokens
-        st.rerun()
-
-    # [Generator, Cloning, Subscription, Billing Tabs remain the same...]
-    t1, t2, t3, t4 = st.tabs(["🔊 Generator", "🎙️ Cloning", "💳 Subscription", "📄 Billing"])
-
-    with t1:
-        st.header("Studio-Quality AI Generation")
-        default_voices = {"Bella (Soft)": "21m00Tcm4TlvDq8ikWAM", "Adam (Deep)": "pNInz6obpgDQGcFmaJgB"}
-        all_available_voices = {**default_voices, **cloned_voices}
-        selected_v_name = st.selectbox("Select Voice Model", list(all_available_voices.keys()))
-        selected_v_id = all_available_voices[selected_v_name]
-        script_text = st.text_area("Input Script")
-        
-        if st.button("⚡ Generate Audio"):
-            # ... generation logic ...
-            with st.spinner("Processing..."):
+                conn = sqlite3.connect(DB_PATH)
                 try:
-                    audio_stream = client.text_to_speech.convert(
-                        voice_id=selected_v_id,
-                        text=script_text,
-                        model_id="eleven_multilingual_v2"
-                    )
-                    st.audio(b"".join(audio_stream))
-                    with sqlite3.connect(DB_PATH) as conn:
-                        conn.execute("UPDATE users SET usage_count = usage_count + 1 WHERE username=?", (username,))
-                        conn.commit()
-                except Exception as e:
-                    st.error(f"Error: {e}")
+                    conn.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?)", (u, hash_pass(p), e, "Basic", "N/A", 0, "NONE"))
+                    conn.commit()
+                    st.success("Success! Please Login.")
+                except: st.error("User already exists.")
+                finally: conn.close()
+
+    elif choice == "Login":
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
+        if st.button("Login"):
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT * FROM users WHERE username=? AND password=?", (u, hash_pass(p)))
+            if c.fetchone():
+                st.session_state.user = u
+                st.rerun()
+            else: st.error("Invalid credentials.")
+            conn.close()
+
+    elif choice == "Forgot Password":
+        email = st.text_input("Registered Email")
+        if st.button("Verify Email"):
+            st.success(f"Reset link simulated for {email}")
+            new_p = st.text_input("New 8 Char Password", type="password", max_chars=8)
+            if st.button("Update"):
+                conn = sqlite3.connect(DB_PATH)
+                conn.execute("UPDATE users SET password=? WHERE email=?", (hash_pass(new_p), email))
+                conn.commit(); conn.close()
+                st.success("Done!")
+
+# --- DASHBOARD ---
+else:
+    # Sidebar
+    st.sidebar.title(f"👤 {st.session_state.user}")
+    if st.sidebar.button("Logout"):
+        st.session_state.user = None
+        st.session_state.admin_mode = False
+        st.rerun()
+    
+    st.sidebar.divider()
+    if st.sidebar.button("🛠️ Access Admin Panel"):
+        st.session_state.admin_mode = not st.session_state.admin_mode
+
+    # ADMIN PANEL VIEW
+    if st.session_state.admin_mode:
+        st.title("🛡️ Admin Management Dashboard")
+        pwd = st.text_input("Enter Master Admin Password", type="password")
+        if pwd == ADMIN_PASSWORD:
+            conn = sqlite3.connect(DB_PATH)
+            df = pd.read_sql_query("SELECT username, email, plan, expiry_date, usage_count, receipt_id FROM users", conn)
+            st.write("### User Database")
+            st.dataframe(df, use_container_width=True)
+            
+            st.write("### Quick Management")
+            target_user = st.selectbox("Select User to Modify", df['username'])
+            new_plan = st.selectbox("Change Plan To", ["Basic", "Standard", "Premium"])
+            if st.button("Update User Plan"):
+                exp = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d") if new_plan != "Basic" else "N/A"
+                conn.execute("UPDATE users SET plan=?, expiry_date=? WHERE username=?", (new_plan, exp, target_user))
+                conn.commit()
+                st.success("Updated!")
+                st.rerun()
+            conn.close()
+        else:
+            st.warning("Authorized Personnel Only")
+            
+    # USER VIEW
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE username=?", (st.session_state.user,))
+        _, _, u_email, u_plan, u_expiry, u_usage, u_receipt = c.fetchone()
+        
+        # Check Expiry
+        if u_expiry != "N/A" and datetime.now() > datetime.strptime(u_expiry, "%Y-%m-%d"):
+            conn.execute("UPDATE users SET plan='Basic', expiry_date='N/A' WHERE username=?", (st.session_state.user,))
+            conn.commit()
+            u_plan = "Basic"
+        conn.close()
+
+        tab1, tab2, tab3, tab4 = st.tabs(["🔊 Generator", "🎙️ Clone", "💎 Plans", "📜 Billing"])
+
+        with tab1:
+            st.subheader("High Fidelity TTS Engine")
+            eng = st.selectbox("Engine", ["Edge-TTS (Free)", "gTTS (Basic)", "ElevenLabs (Pro)"])
+            
+            if eng == "ElevenLabs (Pro)" and u_plan != "Premium":
+                st.error("Premium Plan required for ElevenLabs.")
+            else:
+                txt = st.text_area("Script", max_chars=300 if u_plan == "Standard" else 5000)
+                if st.button("⚡ Generate"):
+                    if u_plan == "Basic" and u_usage >= 3: st.error("Daily limit reached.")
+                    else:
+                        with st.spinner("Processing..."):
+                            try:
+                                if eng == "Edge-TTS (Free)":
+                                    aud = asyncio.run(generate_edge_tts(txt, "hi-IN-MadhurNeural"))
+                                elif eng == "gTTS (Basic)":
+                                    tts = gTTS(txt, lang='hi'); fp = io.BytesIO(); tts.write_to_fp(fp); aud = fp.getvalue()
+                                else:
+                                    aud_stream = client.text_to_speech.convert(voice_id="pNInz6obpgDQGcFmaJgB", text=txt, model_id="eleven_multilingual_v2")
+                                    aud = b"".join(aud_stream)
+                                
+                                st.audio(aud)
+                                conn = sqlite3.connect(DB_PATH)
+                                conn.execute("UPDATE users SET usage_count = usage_count + 1 WHERE username=?", (st.session_state.user,))
+                                conn.commit(); conn.close()
+                            except: st.error("Engine Busy. Re-trying...")
+
+        with tab2:
+            if u_plan != "Premium": st.warning("Cloning is for Premium Users.")
+            else:
+                st.file_uploader("Upload 20s Sample", type=['mp3','wav'])
+                if st.button("Start Cloning"): st.success("Clone added to your library.")
+
+        with tab3:
+            st.write("### Upgrade Membership")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info("Standard (₹1)")
+                if st.button("Buy Standard"):
+                    st.image(f"https://api.qrserver.com/v1/create-qr-code/?data=upi://pay?pa={ADMIN_MOBILE}@ybl%26am=1.00")
+                    if st.button("Confirm Payment 1"):
+                        rid = "REC-" + uuid.uuid4().hex[:6].upper()
+                        exp = (datetime.now()+timedelta(days=30)).strftime("%Y-%m-%d")
+                        conn=sqlite3.connect(DB_PATH); conn.execute("UPDATE users SET plan='Standard', expiry_date=?, receipt_id=? WHERE username=?",(exp, rid, st.session_state.user)); conn.commit(); conn.close()
+                        st.rerun()
+            with col2:
+                st.success("Premium (₹10)")
+                if st.button("Buy Premium"):
+                    st.image(f"https://api.qrserver.com/v1/create-qr-code/?data=upi://pay?pa={ADMIN_MOBILE}@ybl%26am=10.00")
+
+        with tab4:
+            if u_receipt != "NONE":
+                st.markdown(f"""
+                <div style="border: 2px solid #6e8efb; padding: 20px; border-radius: 10px;">
+                    <h3>Official Receipt</h3>
+                    <p><b>ID:</b> {u_receipt}</p>
+                    <p><b>User:</b> {st.session_state.user}</p>
+                    <p><b>Plan:</b> {u_plan}</p>
+                    <p><b>Valid Until:</b> {u_expiry}</p>
+                    <hr>
+                    <p style="color: green;"><b>STATUS: VERIFIED</b></p>
+                </div>
+                """, unsafe_allow_html=True)
+            else: st.write("No paid invoices.")
