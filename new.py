@@ -3,12 +3,13 @@ import sqlite3
 import hashlib
 import uuid
 import datetime
+import asyncio
+import edge_tts
 from datetime import datetime, timedelta
 import streamlit as st
 from elevenlabs.client import ElevenLabs
 
 # --- CONFIGURATION & SECURITY ---
-# Hardcoded fallback as per your instruction to keep everything in one place
 try:
     ELEVEN_KEY = st.secrets.get("ELEVEN_API_KEY", "5eecc00bf17ec14ebedac583a5937edc23005a895a97856e4a465f28d49d7f40")
 except:
@@ -22,14 +23,12 @@ ADMIN_MOBILE = "8452095418"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Ensure Tables Exist
     c.execute('''CREATE TABLE IF NOT EXISTS users 
                  (username TEXT PRIMARY KEY, password TEXT, email TEXT, 
                   plan TEXT, expiry_date TEXT, usage_count INTEGER, receipt_id TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS user_voices 
                  (username TEXT, voice_name TEXT, voice_id TEXT)''')
     
-    # CRITICAL FIX: Auto-Add receipt_id column if it's missing (Prevents Unpack Error)
     c.execute("PRAGMA table_info(users)")
     columns = [column[1] for column in c.fetchall()]
     if "receipt_id" not in columns:
@@ -51,6 +50,13 @@ def upgrade_plan(username, plan_type):
     conn.close()
     return receipt_id, expiry
 
+# --- FREE ENGINE LOGIC ---
+async def generate_free_voice(text, voice_id):
+    communicate = edge_tts.Communicate(text, voice_id)
+    temp_file = f"free_{uuid.uuid4().hex}.mp3"
+    await communicate.save(temp_file)
+    return temp_file
+
 # --- UI SETUP ---
 st.set_page_config(page_title="Global AI Voice Studio Pro", layout="wide")
 init_db()
@@ -58,7 +64,6 @@ init_db()
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 
-# --- AUTHENTICATION INTERFACE ---
 if not st.session_state.logged_in:
     st.title("🌐 Global AI Voice Studio")
     auth_action = st.sidebar.selectbox("Account Access", ["Login", "Sign Up"])
@@ -92,7 +97,6 @@ if not st.session_state.logged_in:
             else: st.error("Invalid credentials!")
             conn.close()
 
-# --- MAIN DASHBOARD AREA ---
 else:
     username = st.session_state.user
     conn = sqlite3.connect(DB_PATH)
@@ -101,7 +105,6 @@ else:
     userData = c.fetchone()
     conn.close()
     
-    # Safe Unpacking (Matches 7 Columns)
     _, _, email, plan, expiry, usage, receipt_id = userData
 
     st.sidebar.title(f"User: {username}")
@@ -114,37 +117,54 @@ else:
 
     with t1:
         st.header("Studio-Quality AI Generation")
+        
+        # --- NEW ENGINE SELECTION ---
+        engine_choice = st.radio("Select Generation Engine:", ["ElevenLabs (Premium)", "Free Server (No Error)"], horizontal=True)
+        
         c1, c2 = st.columns(2)
         with c1:
             target_lang = st.selectbox("Select Script Language", ["English", "Hindi", "French", "German", "Spanish", "Japanese"])
-            el_voices = {"Bella (Soft)": "21m00Tcm4TlvDq8ikWAM", "Adam (Deep)": "pNInz6obpgDQGcFmaJgB", "Rachel (Pro)": "21m00Tcm4TlvDq8ikWAM"}
-            selected_v = st.selectbox("Select Voice Model", list(el_voices.keys()))
+            
+            if engine_choice == "ElevenLabs (Premium)":
+                el_voices = {"Bella (Soft)": "21m00Tcm4TlvDq8ikWAM", "Adam (Deep)": "pNInz6obpgDQGcFmaJgB", "Rachel (Pro)": "21m00Tcm4TlvDq8ikWAM"}
+                selected_v = st.selectbox("Select ElevenLabs Voice", list(el_voices.keys()))
+            else:
+                free_voices = {"English": "en-US-AvaNeural", "Hindi": "hi-IN-MadhurNeural", "French": "fr-FR-EloiseNeural", "German": "de-DE-KatjaNeural", "Spanish": "es-ES-AlvaroNeural", "Japanese": "ja-JP-NanamiNeural"}
+                selected_v_id = free_voices[target_lang]
         
         script_text = st.text_area("Write your script here:", placeholder="Type your text...")
-        
         limit = 3 if plan == "Free" else (50 if plan == "Standard" else 5000)
         
         if st.button("⚡ Generate Audio"):
             if usage >= limit:
-                st.error("Usage limit reached. Please upgrade your subscription.")
+                st.error("Usage limit reached. Please upgrade.")
             elif not script_text:
                 st.warning("Please enter some text.")
             else:
-                with st.spinner(f"Generating {target_lang} speech..."):
+                with st.spinner(f"Generating via {engine_choice}..."):
                     try:
-                        audio_stream = client.text_to_speech.convert(
-                            voice_id=el_voices[selected_v],
-                            text=script_text,
-                            model_id="eleven_multilingual_v2",
-                            output_format="mp3_44100_128"
-                        )
-                        st.audio(b"".join(audio_stream))
+                        if engine_choice == "ElevenLabs (Premium)":
+                            audio_stream = client.text_to_speech.convert(
+                                voice_id=el_voices[selected_v],
+                                text=script_text,
+                                model_id="eleven_multilingual_v2",
+                                output_format="mp3_44100_128"
+                            )
+                            st.audio(b"".join(audio_stream))
+                        else:
+                            temp_audio = asyncio.run(generate_free_voice(script_text, selected_v_id))
+                            with open(temp_audio, "rb") as f:
+                                st.audio(f.read(), format="audio/mp3")
+                            os.remove(temp_audio)
                         
                         conn = sqlite3.connect(DB_PATH)
                         conn.execute("UPDATE users SET usage_count = usage_count + 1 WHERE username=?", (username,))
                         conn.commit()
                         conn.close()
-                    except Exception as e: st.error(f"Error: {e}")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                        if "unusual_activity" in str(e).lower():
+                            st.info("💡 ElevenLabs blocked this request. Please switch to 'Free Server' above to generate for free!")
 
     with t2:
         st.header("Private Voice Cloning")
@@ -162,34 +182,28 @@ else:
 
     with t3:
         st.header("Upgrade Your Membership")
-        st.write("Professional plans for global creators.")
-        
         col_std, col_pre = st.columns(2)
         with col_std:
             with st.container(border=True):
                 st.subheader("Standard Plan")
                 st.write("Price: ₹1 / Month")
-                st.write("- 50 High-Quality Generations")
                 if st.button("Activate Standard"):
                     rid, exp = upgrade_plan(username, "Standard")
-                    st.success(f"Activated! Receipt: {rid}")
+                    st.success(f"Activated! ID: {rid}")
                     st.rerun()
-
         with col_pre:
             with st.container(border=True):
                 st.subheader("Premium Unlimited")
                 st.write("Price: ₹10 / Month")
-                st.write("- 5000 Generations & Cloning")
                 if st.button("Activate Premium"):
                     rid, exp = upgrade_plan(username, "Premium")
-                    st.success(f"Activated! Receipt: {rid}")
+                    st.success(f"Activated! ID: {rid}")
                     st.rerun()
         
         st.divider()
         st.write("### 📲 Instant UPI Payment")
         upi_link = f"upi://pay?pa={ADMIN_MOBILE}@ybl&pn=AI_Studio&am=1.00&cu=INR"
         st.image(f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={upi_link}")
-        st.info(f"Payment Support: +91-{ADMIN_MOBILE}")
 
     with t4:
         st.header("Official Digital Receipt")
@@ -198,16 +212,10 @@ else:
         else:
             with st.container(border=True):
                 st.title("INVOICE / RECEIPT")
-                st.divider()
-                st.subheader(f"ID: {receipt_id}")
-                c_inv1, c_inv2 = st.columns(2)
-                with c_inv1:
-                    st.write("**Customer:**", username)
-                    st.write("**Email:**", email)
-                with c_inv2:
-                    st.write("**Plan:**", plan)
-                    st.write("**Expiry:**", expiry)
-                st.divider()
+                st.write(f"**ID:** {receipt_id}")
+                st.write(f"**User:** {username}")
+                st.write(f"**Plan:** {plan}")
+                st.write(f"**Expiry:** {expiry}")
                 st.success("STATUS: PAID & VERIFIED")
 
 # Strictly no file modification or deletion logic.
