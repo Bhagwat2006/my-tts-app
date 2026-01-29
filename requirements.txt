@@ -1,3 +1,4 @@
 streamlit
 elevenlabs
 edge-tts
+supabase
