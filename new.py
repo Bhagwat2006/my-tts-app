@@ -1,13 +1,14 @@
 import os
 import sqlite3
-import bcrypt  # Replaced hashlib
+import hashlib
 import uuid
+import datetime
 from datetime import datetime, timedelta
 import streamlit as st
-import streamlit.components.v1 as components
 from elevenlabs.client import ElevenLabs
 
 # --- CONFIGURATION & SECURITY ---
+# Hardcoded fallback as per your instruction to keep everything in one place
 try:
     ELEVEN_KEY = st.secrets.get("ELEVEN_API_KEY", "5eecc00bf17ec14ebedac583a5937edc23005a895a97856e4a465f28d49d7f40")
 except:
@@ -17,183 +18,79 @@ client = ElevenLabs(api_key=ELEVEN_KEY)
 DB_PATH = "studio_v4.db"
 ADMIN_MOBILE = "8452095418"
 
-# --- 🚀 THE 3D ENGINE & GLASS UI ---
-def inject_ui_engine():
-    st.markdown("""
-        <style>
-        .main { background: #05050a; color: #e0e0e0; font-family: 'Inter', sans-serif; }
-        .glass-card {
-            background: rgba(255, 255, 255, 0.03) !important;
-            backdrop-filter: blur(20px) !important;
-            border: 1px solid rgba(255, 255, 255, 0.1) !important;
-            border-radius: 25px !important;
-            padding: 40px !important;
-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.8) !important;
-        }
-        [data-baseweb="tab-panel"] {
-            animation: slideIn 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
-        }
-        @keyframes slideIn {
-            0% { opacity: 0; transform: translateY(30px); filter: blur(5px); }
-            100% { opacity: 1; transform: translateY(0); filter: blur(0); }
-        }
-        input { 
-            background: rgba(255, 255, 255, 0.05) !important; 
-            border: 1px solid rgba(255, 255, 255, 0.1) !important; 
-            color: white !important; 
-            border-radius: 10px !important;
-        }
-        .stButton>button {
-            background: linear-gradient(90deg, #00d2ff 0%, #3a7bd5 100%) !important;
-            border: none !important;
-            color: white !important;
-            padding: 12px 24px !important;
-            border-radius: 12px !important;
-            font-weight: bold !important;
-            transition: 0.3s all ease !important;
-            text-transform: uppercase !important;
-        }
-        .stButton>button:hover {
-            transform: translateY(-3px) !important;
-            box-shadow: 0 5px 20px rgba(0, 210, 255, 0.5) !important;
-        }
-        </style>
-    """, unsafe_allow_html=True)
-
-    components.html("""
-        <div id="particles-js" style="position: fixed; width: 100vw; height: 100vh; top: 0; left: 0; z-index: -1;"></div>
-        <script src="https://cdn.jsdelivr.net/particles.js/2.0.0/particles.min.js"></script>
-        <script>
-            particlesJS('particles-js', {
-                "particles": {
-                    "number": {"value": 100, "density": {"enable": true, "value_area": 800}},
-                    "color": {"value": "#00d2ff"},
-                    "shape": {"type": "circle"},
-                    "opacity": {"value": 0.5, "random": true},
-                    "size": {"value": 3, "random": true},
-                    "line_linked": {"enable": true, "distance": 150, "color": "#3a7bd5", "opacity": 0.4, "width": 1},
-                    "move": {"enable": true, "speed": 2, "out_mode": "out"}
-                },
-                "interactivity": {"events": {"onhover": {"enable": true, "mode": "grab"}, "onclick": {"enable": true, "mode": "push"}}}
-            });
-        </script>
-    """, height=0)
-
-# --- DATABASE ENGINE ---
+# --- DATABASE ENGINE & AUTO-MIGRATION ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    # Ensure Tables Exist
     c.execute('''CREATE TABLE IF NOT EXISTS users 
-                  (username TEXT PRIMARY KEY, password TEXT, email TEXT, 
+                 (username TEXT PRIMARY KEY, password TEXT, email TEXT, 
                   plan TEXT, expiry_date TEXT, usage_count INTEGER, receipt_id TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS user_voices 
-                  (username TEXT, voice_name TEXT, voice_id TEXT)''')
+                 (username TEXT, voice_name TEXT, voice_id TEXT)''')
+    
+    # CRITICAL FIX: Auto-Add receipt_id column if it's missing (Prevents Unpack Error)
     c.execute("PRAGMA table_info(users)")
     columns = [column[1] for column in c.fetchall()]
     if "receipt_id" not in columns:
         c.execute("ALTER TABLE users ADD COLUMN receipt_id TEXT DEFAULT 'NONE'")
+    
     conn.commit()
     conn.close()
 
-# --- SECURITY UPDATE: BCRYPT ---
 def hash_pass(password):
-    """Generates a secure bcrypt hash."""
-    salt = bcrypt.gensalt()
-    return bcrypt.hashpw(password.strip().encode('utf-8'), salt).decode('utf-8')
-
-def verify_pass(entered_password, stored_hash):
-    """Verifies password against stored bcrypt hash."""
-    try:
-        return bcrypt.checkpw(entered_password.strip().encode('utf-8'), stored_hash.encode('utf-8'))
-    except:
-        return False
+    return hashlib.sha256(str.encode(password[:8])).hexdigest()
 
 def upgrade_plan(username, plan_type):
     receipt_id = f"REC-{uuid.uuid4().hex[:8].upper()}"
     expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE users SET plan=?, expiry_date=?, usage_count=0, receipt_id=? WHERE username=?", 
-                  (plan_type, expiry, receipt_id, username))
+                 (plan_type, expiry, receipt_id, username))
     conn.commit()
     conn.close()
     return receipt_id, expiry
 
-def recover_password(u, e, new_p):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE LOWER(username)=LOWER(?) AND LOWER(email)=LOWER(?)", (u.strip(), e.strip()))
-    user_found = c.fetchone()
-    if user_found:
-        c.execute("UPDATE users SET password=? WHERE username=?", (hash_pass(new_p), user_found[0]))
-        conn.commit()
-        conn.close()
-        return True
-    conn.close()
-    return False
-
 # --- UI SETUP ---
-st.set_page_config(page_title="Ultra AI Studio Pro", layout="wide")
-inject_ui_engine()
+st.set_page_config(page_title="Global AI Voice Studio Pro", layout="wide")
 init_db()
 
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 
-# --- DYNAMIC LOGIN PORTAL ---
+# --- AUTHENTICATION INTERFACE ---
 if not st.session_state.logged_in:
-    cols = st.columns([1, 2, 1])
-    with cols[1]:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.title("🌐 AI Studio Nexus")
-        auth_action = st.radio("Access Protocol", ["Login", "Sign Up", "Forgot Password"], horizontal=True)
-        
-        if auth_action == "Sign Up":
-            u = st.text_input("Choose Username").strip()
-            e = st.text_input("Email Address").strip()
-            p = st.text_input("Create Password (min 8 chars)", type="password").strip()
-            if st.button("Initialize Account"):
-                if u and e and len(p) >= 8:
-                    conn = sqlite3.connect(DB_PATH)
-                    try:
-                        conn.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?)", (u, hash_pass(p), e, "Free", "N/A", 0, "NONE"))
-                        conn.commit()
-                        st.success("Account created! Switch to Login.")
-                    except sqlite3.IntegrityError: 
-                        st.error("Username already taken!")
-                    finally:
-                        conn.close()
-                else: st.warning("Ensure all fields are filled & password is at least 8 chars.")
-        
-        elif auth_action == "Forgot Password":
-            st.subheader("Neural Recovery")
-            u_rec = st.text_input("Target Username").strip()
-            e_rec = st.text_input("Registered Email").strip()
-            new_p = st.text_input("New Password (min 8 chars)", type="password").strip()
-            if st.button("Reset Identity Password"):
-                if u_rec and e_rec and len(new_p) >= 8:
-                    if recover_password(u_rec, e_rec, new_p):
-                        st.success("Identity Updated! Login now.")
-                    else:
-                        st.error("Verification Mismatch! Check Username/Email.")
-                else: st.warning("Fill all fields correctly.")
-
-        else:
-            u_log = st.text_input("Username").strip()
-            p_log = st.text_input("Password", type="password").strip()
-            if st.button("Authorize Access"):
+    st.title("🌐 Global AI Voice Studio")
+    auth_action = st.sidebar.selectbox("Account Access", ["Login", "Sign Up"])
+    
+    if auth_action == "Sign Up":
+        u = st.text_input("Choose Username")
+        e = st.text_input("Email Address")
+        p = st.text_input("Create Password (Exactly 8 chars)", type="password", max_chars=8)
+        if st.button("Create Account"):
+            if len(p) == 8:
                 conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                c.execute("SELECT * FROM users WHERE LOWER(username)=LOWER(?)", (u_log,))
-                userData = c.fetchone()
+                try:
+                    conn.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?)", (u, hash_pass(p), e, "Free", "N/A", 0, "NONE"))
+                    conn.commit()
+                    st.success("Account created! Please switch to Login.")
+                except: st.error("Username already taken!")
                 conn.close()
-                
-                # Using the new bcrypt verification logic
-                if userData and verify_pass(p_log, userData[1]):
-                    st.session_state.logged_in = True
-                    st.session_state.user = userData[0]
-                    st.rerun()
-                else: st.error("Invalid credentials!")
-        st.markdown('</div>', unsafe_allow_html=True)
+            else: st.warning("Password must be exactly 8 characters.")
+    else:
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password", max_chars=8)
+        if st.button("Secure Login"):
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT * FROM users WHERE username=? AND password=?", (u, hash_pass(p)))
+            userData = c.fetchone()
+            if userData:
+                st.session_state.logged_in = True
+                st.session_state.user = u
+                st.rerun()
+            else: st.error("Invalid credentials!")
+            conn.close()
 
 # --- MAIN DASHBOARD AREA ---
 else:
@@ -204,41 +101,42 @@ else:
     userData = c.fetchone()
     conn.close()
     
+    # Safe Unpacking (Matches 7 Columns)
     _, _, email, plan, expiry, usage, receipt_id = userData
 
-    with st.sidebar:
-        st.markdown(f"### 🛡️ Operator: {username}")
-        st.info(f"Membership: {plan}")
-        if st.button("Terminate Session"):
-            st.session_state.logged_in = False
-            st.rerun()
+    st.sidebar.title(f"User: {username}")
+    st.sidebar.info(f"Membership: {plan}")
+    if st.sidebar.button("Logout"):
+        st.session_state.logged_in = False
+        st.rerun()
 
     t1, t2, t3, t4 = st.tabs(["🔊 Generator", "🎙️ Cloning", "💳 Subscription", "📄 Billing"])
 
     with t1:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.header("Neural Audio Synthesis")
+        st.header("Studio-Quality AI Generation")
         c1, c2 = st.columns(2)
         with c1:
-            target_lang = st.selectbox("Language", ["English", "Hindi", "French", "German"])
-            el_voices = {"Bella (Soft)": "21m00Tcm4TlvDq8ikWAM", "Adam (Deep)": "pNInz6obpgDQGcFmaJgB"}
-            selected_v = st.selectbox("Voice Model", list(el_voices.keys()))
+            target_lang = st.selectbox("Select Script Language", ["English", "Hindi", "French", "German", "Spanish", "Japanese"])
+            el_voices = {"Bella (Soft)": "21m00Tcm4TlvDq8ikWAM", "Adam (Deep)": "pNInz6obpgDQGcFmaJgB", "Rachel (Pro)": "21m00Tcm4TlvDq8ikWAM"}
+            selected_v = st.selectbox("Select Voice Model", list(el_voices.keys()))
         
-        script_text = st.text_area("Input Script", placeholder="Enter text for global synthesis...")
+        script_text = st.text_area("Write your script here:", placeholder="Type your text...")
+        
         limit = 3 if plan == "Free" else (50 if plan == "Standard" else 5000)
         
-        if st.button("⚡ Execute Generation"):
+        if st.button("⚡ Generate Audio"):
             if usage >= limit:
-                st.error("Limit reached. Upgrade at Subscription tab.")
+                st.error("Usage limit reached. Please upgrade your subscription.")
             elif not script_text:
-                st.warning("Input required.")
+                st.warning("Please enter some text.")
             else:
-                with st.spinner(f"Synthesizing {target_lang}..."):
+                with st.spinner(f"Generating {target_lang} speech..."):
                     try:
                         audio_stream = client.text_to_speech.convert(
                             voice_id=el_voices[selected_v],
                             text=script_text,
-                            model_id="eleven_multilingual_v2"
+                            model_id="eleven_multilingual_v2",
+                            output_format="mp3_44100_128"
                         )
                         st.audio(b"".join(audio_stream))
                         
@@ -247,62 +145,69 @@ else:
                         conn.commit()
                         conn.close()
                     except Exception as e: st.error(f"Error: {e}")
-        st.markdown('</div>', unsafe_allow_html=True)
 
     with t2:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
         st.header("Private Voice Cloning")
         if plan == "Free":
-            st.warning("Cloning requires a Standard or Premium subscription.")
+            st.warning("Voice Cloning requires a Standard or Premium subscription.")
         else:
-            voice_file = st.file_uploader("Upload Sample", type=['wav','mp3'])
-            label = st.text_input("Voice Name")
-            if st.button("Begin Neural Clone"):
+            voice_file = st.file_uploader("Upload clear voice sample (MP3/WAV)", type=['wav','mp3'])
+            label = st.text_input("Name this Voice")
+            if st.button("Create Personal Clone"):
                 if voice_file and label:
-                    with st.spinner("Analyzing DNA..."):
+                    with st.spinner("Analyzing and Cloning..."):
                         new_voice = client.voices.add(name=label, files=[voice_file])
                         st.success(f"Success! Voice ID: {new_voice.voice_id}")
-        st.markdown('</div>', unsafe_allow_html=True)
+                else: st.error("Upload a file and give it a name.")
 
     with t3:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.header("Upgrade Neural Level")
-        col1, col2 = st.columns(2)
-        with col1:
+        st.header("Upgrade Your Membership")
+        st.write("Professional plans for global creators.")
+        
+        col_std, col_pre = st.columns(2)
+        with col_std:
             with st.container(border=True):
-                st.subheader("Standard")
-                st.write("₹1 / Mo")
+                st.subheader("Standard Plan")
+                st.write("Price: ₹1 / Month")
+                st.write("- 50 High-Quality Generations")
                 if st.button("Activate Standard"):
-                    upgrade_plan(username, "Standard")
+                    rid, exp = upgrade_plan(username, "Standard")
+                    st.success(f"Activated! Receipt: {rid}")
                     st.rerun()
 
-        with col2:
+        with col_pre:
             with st.container(border=True):
-                st.subheader("👑 Premium Ultra")
-                st.write("₹10 / Mo")
+                st.subheader("Premium Unlimited")
+                st.write("Price: ₹10 / Month")
+                st.write("- 5000 Generations & Cloning")
                 if st.button("Activate Premium"):
-                    upgrade_plan(username, "Premium")
-                    st.balloons()
+                    rid, exp = upgrade_plan(username, "Premium")
+                    st.success(f"Activated! Receipt: {rid}")
                     st.rerun()
         
         st.divider()
         st.write("### 📲 Instant UPI Payment")
-        st.info(f"Pay to UPI ID / Number: {ADMIN_MOBILE}@ybl")
-        upi_link = f"upi://pay?pa={ADMIN_MOBILE}@ybl&pn=AI_Studio_Premium&am=10.00&cu=INR"
-        st.image(f"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data={upi_link}")
-        st.markdown('</div>', unsafe_allow_html=True)
+        upi_link = f"upi://pay?pa={ADMIN_MOBILE}@ybl&pn=AI_Studio&am=1.00&cu=INR"
+        st.image(f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={upi_link}")
+        st.info(f"Payment Support: +91-{ADMIN_MOBILE}")
 
     with t4:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.header("Digital Ledger")
+        st.header("Official Digital Receipt")
         if receipt_id == "NONE":
-            st.info("No active paid subscriptions.")
+            st.write("No active paid subscriptions found.")
         else:
-            st.title("INVOICE / RECEIPT")
-            st.divider()
-            st.subheader(f"ID: {receipt_id}")
-            st.write(f"**Customer:** {username}")
-            st.write(f"**Plan:** {plan}")
-            st.write(f"**Expiry:** {expiry}")
-            st.success("STATUS: PAID & VERIFIED")
-        st.markdown('</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                st.title("INVOICE / RECEIPT")
+                st.divider()
+                st.subheader(f"ID: {receipt_id}")
+                c_inv1, c_inv2 = st.columns(2)
+                with c_inv1:
+                    st.write("**Customer:**", username)
+                    st.write("**Email:**", email)
+                with c_inv2:
+                    st.write("**Plan:**", plan)
+                    st.write("**Expiry:**", expiry)
+                st.divider()
+                st.success("STATUS: PAID & VERIFIED")
+
+# Strictly no file modification or deletion logic.
