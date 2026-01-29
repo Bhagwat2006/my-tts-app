@@ -21,7 +21,7 @@ from supabase import create_client, Client
 # SUPABASE_KEY = "your_api_key"
 
 url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
+key = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(url, key)
 
 # --- REPLACING SQLITE WITH SUPABASE ---
@@ -294,5 +294,6 @@ else:
                 </div>
                 """, unsafe_allow_html=True)
             else: st.write("No paid invoices.")
+
 
 
