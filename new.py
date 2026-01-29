@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import streamlit as st
 import streamlit.components.v1 as components
 from elevenlabs.client import ElevenLabs
+from elevenlabs import VoiceSettings
 import edge_tts
 from gtts import gTTS
 import io
@@ -33,7 +34,7 @@ supabase = get_supabase_client()
 ADMIN_PASSWORD = "ADMIN@123"
 ELEVEN_KEY = st.secrets.get("ELEVEN_API_KEY", "5eecc00bf17ec14ebedac583a5937edc23005a895a97856e4a465f28d49d7f40")
 client = ElevenLabs(api_key=ELEVEN_KEY)
-ADMIN_MOBILE = "8452095418"  # Your UPI Number
+ADMIN_MOBILE = "8452095418"  
 UPI_ID = f"{ADMIN_MOBILE}@ybl"
 
 def hash_pass(password):
@@ -44,70 +45,32 @@ def inject_ui_effects():
     st.markdown(f"""
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap');
-        
         * {{ font-family: 'Poppins', sans-serif; }}
-        
-        .main {{ 
-            background: radial-gradient(circle at top right, #1e1e2f, #0f0c29); 
-            color: white; 
-        }}
-
-        /* 3D Glassmorphism Cards */
+        .main {{ background: radial-gradient(circle at top right, #1e1e2f, #0f0c29); color: white; }}
         .st-emotion-cache-1r6slb0 {{
             background: rgba(255, 255, 255, 0.05);
             backdrop-filter: blur(10px);
             border-radius: 20px;
             border: 1px solid rgba(255, 255, 255, 0.1);
-            transition: transform 0.3s ease, box-shadow 0.3s ease;
         }}
-        .st-emotion-cache-1r6slb0:hover {{
-            transform: translateY(-5px) rotateX(2deg);
-            box-shadow: 0 20px 40px rgba(0,0,0,0.4);
-        }}
-
-        /* Animated Buttons */
         .stButton>button {{
             background: linear-gradient(45deg, #6e8efb, #a7b7fb);
-            border: none;
-            color: white;
-            font-weight: 600;
             border-radius: 12px;
-            padding: 10px 24px;
-            transition: all 0.3s ease;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }}
-        .stButton>button:hover {{
-            transform: scale(1.05);
-            box-shadow: 0 0 20px rgba(110,142,251,0.6);
-        }}
-
-        /* Custom Floating Help Button */
-        .help-footer {{
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            background: rgba(110,142,251,0.9);
-            padding: 15px 25px;
-            border-radius: 50px;
-            color: white;
-            font-weight: bold;
-            box-shadow: 0 10px 20px rgba(0,0,0,0.3);
-            z-index: 1000;
-            cursor: pointer;
             transition: 0.3s;
         }}
-        .help-footer:hover {{ transform: scale(1.1); background: #fff; color: #6e8efb; }}
+        .help-footer {{
+            position: fixed; bottom: 20px; right: 20px;
+            background: rgba(110,142,251,0.9); padding: 15px 25px;
+            border-radius: 50px; color: white; z-index: 1000;
+        }}
         </style>
     """, unsafe_allow_html=True)
-    
-    # Help Center Floating Button
     st.markdown(f'<div class="help-footer">🆘 Help Center: +91 {ADMIN_MOBILE}</div>', unsafe_allow_html=True)
 
 # --- ENGINES ---
-async def generate_edge_tts(text, voice):
+async def generate_edge_tts(text, voice, rate="+0%", pitch="+0Hz"):
     try:
-        communicate = edge_tts.Communicate(text, voice)
+        communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
         data = b""
         async for chunk in communicate.stream():
             if chunk["type"] == "audio": data += chunk["data"]
@@ -118,7 +81,6 @@ async def generate_edge_tts(text, voice):
 inject_ui_effects()
 
 if 'user' not in st.session_state: st.session_state.user = None
-if 'admin_mode' not in st.session_state: st.session_state.admin_mode = False
 if 'current_page' not in st.session_state: st.session_state.current_page = "Studio"
 
 # --- AUTH LAYER ---
@@ -146,109 +108,114 @@ if not st.session_state.user:
                     st.success("Account Created!")
                 except: st.error("User exists.")
 
-# --- DASHBOARD LAYER ---
 else:
-    # 3D SIDEBAR NAVIGATION
+    # --- FETCH USER DATA ---
+    res = supabase.table("users").select("*").eq("username", st.session_state.user).execute()
+    u_info = res.data[0]
+
+    # --- 3D SIDEBAR ---
     with st.sidebar:
         st.markdown(f"### 👤 {st.session_state.user}")
+        st.caption(f"Plan: {u_info['plan']}")
         st.divider()
-        
-        # Dynamic Navigation Buttons
         if st.button("✨ Voice Studio"): st.session_state.current_page = "Studio"
-        if st.button("🧬 Neural Cloning"): st.session_state.current_page = "Cloning"
-        if st.button("💳 Billing & Upgrades"): st.session_state.current_page = "Billing"
-        if st.button("🛠️ Admin Panel"): st.session_state.current_page = "Admin"
-        
+        if st.button("🧬 Voice Cloning"): st.session_state.current_page = "Cloning"
+        if st.button("🔑 API Access"): st.session_state.current_page = "API"
+        if st.button("💳 Billing"): st.session_state.current_page = "Billing"
+        if st.button("🛠️ Admin"): st.session_state.current_page = "Admin"
         st.divider()
         if st.button("🚪 Logout"):
             st.session_state.user = None
             st.rerun()
 
-    # --- DATABASE FETCH ---
-    res = supabase.table("users").select("*").eq("username", st.session_state.user).execute()
-    u_info = res.data[0]
-
-    # --- PAGE: STUDIO ---
+    # --- PAGE: STUDIO (WITH ELEVENLABS SLIDERS) ---
     if st.session_state.current_page == "Studio":
-        st.header("🎙️ AI Voice Generation Studio")
+        st.header("🎙️ Advanced AI Voice Lab")
+        
+        tab_simple, tab_pro = st.tabs(["Standard Mode", "Professional Audio Lab"])
+        
+        with tab_pro:
+            st.subheader("Fine-Tuning Controls (ElevenLabs Style)")
+            col_s1, col_s2, col_s3 = st.columns(3)
+            with col_s1:
+                stability = st.slider("Stability", 0.0, 1.0, 0.5, help="High: Consistent voice. Low: Emotional/Variable.")
+                speed = st.slider("Speech Rate", 0.5, 2.0, 1.0)
+            with col_s2:
+                clarity = st.slider("Clarity + Similarity", 0.0, 1.0, 0.75)
+                pitch_val = st.slider("Pitch Control", -20, 20, 0)
+            with col_s3:
+                exaggeration = st.slider("Style Exaggeration", 0.0, 1.0, 0.0)
+                st.info("Pro Tip: Lower stability for story telling, higher for news.")
+
         c1, c2 = st.columns([2, 1])
         with c1:
-            eng = st.selectbox("Model", ["Edge-TTS Ultra", "gTTS Basic", "ElevenLabs Pro"])
-            txt = st.text_area("Your Script", placeholder="Type here...", height=250)
-            if st.button("⚡ Generate Audio"):
+            eng = st.selectbox("Engine", ["Edge-TTS Ultra", "ElevenLabs v2", "gTTS Basic"])
+            txt = st.text_area("Script", placeholder="Tip: Use 'Name: Text' for future multi-speaker support...", height=200)
+            
+            if st.button("⚡ Synthesize Master Audio"):
                 if u_info['plan'] == "Basic" and u_info['usage_count'] >= 5:
-                    st.warning("Daily limit reached. Please Upgrade.")
+                    st.warning("Limit reached. Upgrade to continue.")
                 else:
-                    with st.spinner("✨ Synthesizing 3D Audio..."):
+                    with st.spinner("Generating High-Fidelity Audio..."):
                         if "Edge" in eng:
-                            aud = asyncio.run(generate_edge_tts(txt, "hi-IN-MadhurNeural"))
-                        elif "gTTS" in eng:
-                            tts = gTTS(txt, lang='hi'); f = io.BytesIO(); tts.write_to_fp(f); aud = f.getvalue()
-                        else:
-                            if u_info['plan'] != "Premium": st.error("ElevenLabs is Premium Only."); st.stop()
-                            s = client.text_to_speech.convert(voice_id="pNInz6obpgDQGcFmaJgB", text=txt, model_id="eleven_multilingual_v2")
+                            p_str = f"{pitch_val}Hz"
+                            r_str = f"{int((speed-1)*100)}%"
+                            aud = asyncio.run(generate_edge_tts(txt, "hi-IN-MadhurNeural", rate=r_str, pitch=p_str))
+                        elif "ElevenLabs" in eng:
+                            if u_info['plan'] != "Premium": st.error("Premium Plan Required"); st.stop()
+                            s = client.text_to_speech.convert(
+                                voice_id="pNInz6obpgDQGcFmaJgB",
+                                text=txt,
+                                model_id="eleven_multilingual_v2",
+                                voice_settings=VoiceSettings(stability=stability, similarity_boost=clarity, style=exaggeration)
+                            )
                             aud = b"".join(s)
-                        
+                        else:
+                            tts = gTTS(txt, lang='hi'); f = io.BytesIO(); tts.write_to_fp(f); aud = f.getvalue()
+
                         if aud:
                             st.audio(aud)
+                            st.download_button("📥 Download MP3", aud, file_name="ai_studio_pro.mp3")
                             supabase.table("users").update({"usage_count": u_info['usage_count'] + 1}).eq("username", st.session_state.user).execute()
-        with c2:
-            st.markdown(f"""
-            ### Status Board
-            - **Plan:** {u_info['plan']}
-            - **Usage:** {u_info['usage_count']} Generations
-            - **Expiry:** {u_info['expiry_date']}
-            """)
-            if st.button("🚀 Quick Upgrade"):
-                st.session_state.current_page = "Billing"
-                st.rerun()
+
+    # --- PAGE: API KEY GENERATION ---
+    elif st.session_state.current_page == "API":
+        st.header("🔑 Developer API Portal")
+        if u_info['plan'] == "Basic":
+            st.warning("API Access is for Standard/Premium users.")
+        else:
+            st.write("Integrate our AI Voice into your own apps.")
+            if st.button("Generate New API Secret"):
+                new_key = f"sk_live_{uuid.uuid4().hex[:16]}"
+                st.code(new_key, language="text")
+                st.success("Keep this safe! It will not be shown again.")
 
     # --- PAGE: CLONING ---
     elif st.session_state.current_page == "Cloning":
-        st.header("🧬 Voice Cloning Lab")
+        st.header("🧬 Neural Voice Cloning")
         if u_info['plan'] != "Premium":
-            st.error("Locked! Premium Plan required for Neural Cloning.")
-            if st.button("Unlock Premium Now"):
-                st.session_state.current_page = "Billing"
-                st.rerun()
+            st.error("Premium Required for Voice Cloning.")
         else:
-            st.file_uploader("Upload Sample (20s)")
-            st.button("Start Training Model")
+            st.file_uploader("Upload 20s High-Quality Sample")
+            st.button("Train Voice Model")
 
-    # --- PAGE: BILLING & UPGRADES ---
+    # --- PAGE: BILLING ---
     elif st.session_state.current_page == "Billing":
-        st.header("💳 Membership & Upgrades")
-        col1, col2 = st.columns(2)
-        
-        with col1:
+        st.header("💳 Membership Plans")
+        p1, p2 = st.columns(2)
+        with p1:
             st.info("### Standard (₹1)")
-            st.write("Unlimited Basic Generations + No Ads")
-            if st.button("Purchase Standard"):
+            if st.button("Get Standard"):
                 st.image(f"https://api.qrserver.com/v1/create-qr-code/?data=upi://pay?pa={UPI_ID}%26am=1.00")
-                if st.button("Confirm ₹1 Payment"):
-                    rid = "STD-" + uuid.uuid4().hex[:6].upper()
-                    exp = (datetime.now()+timedelta(days=30)).strftime("%Y-%m-%d")
-                    supabase.table("users").update({"plan": "Standard", "expiry_date": exp, "receipt_id": rid}).eq("username", st.session_state.user).execute()
-                    st.success("Welcome to Standard!")
-                    st.rerun()
-
-        with col2:
+        with p2:
             st.success("### Premium (₹10)")
-            st.write("ElevenLabs + Voice Cloning + 24/7 Support")
-            if st.button("Purchase Premium"):
+            if st.button("Get Premium"):
                 st.image(f"https://api.qrserver.com/v1/create-qr-code/?data=upi://pay?pa={UPI_ID}%26am=10.00")
-                if st.button("Confirm ₹10 Payment"):
-                    rid = "PRM-" + uuid.uuid4().hex[:6].upper()
-                    exp = (datetime.now()+timedelta(days=30)).strftime("%Y-%m-%d")
-                    supabase.table("users").update({"plan": "Premium", "expiry_date": exp, "receipt_id": rid}).eq("username", st.session_state.user).execute()
-                    st.success("Welcome to Premium!")
-                    st.rerun()
 
     # --- PAGE: ADMIN ---
     elif st.session_state.current_page == "Admin":
-        st.header("🛡️ Master Control")
-        pwd = st.text_input("Admin Key", type="password")
-        if pwd == ADMIN_PASSWORD:
-            res = supabase.table("users").select("*").execute()
-            st.dataframe(pd.DataFrame(res.data))
-        else: st.warning("Restricted Area")
+        st.header("🛡️ Master Dashboard")
+        apk = st.text_input("Admin Key", type="password")
+        if apk == ADMIN_PASSWORD:
+            all_u = supabase.table("users").select("*").execute()
+            st.dataframe(pd.DataFrame(all_u.data))
