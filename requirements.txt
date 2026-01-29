@@ -3,3 +3,5 @@ elevenlabs
 edge-tts
 supabase
 bcrypt
+gTTS
+pandas
