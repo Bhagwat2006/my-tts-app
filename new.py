@@ -18,14 +18,11 @@ client = ElevenLabs(api_key=ELEVEN_KEY)
 DB_PATH = "studio_v4.db"
 ADMIN_MOBILE = "8452095418"
 
-# --- 🚀 THE 3D ENGINE & GLASS UI (MODERN INJECTION) ---
+# --- 🚀 THE 3D ENGINE & GLASS UI ---
 def inject_ui_engine():
     st.markdown("""
         <style>
-        /* Global Background */
         .main { background: #05050a; color: #e0e0e0; font-family: 'Inter', sans-serif; }
-        
-        /* Glassmorphism Auth Card */
         .glass-card {
             background: rgba(255, 255, 255, 0.03) !important;
             backdrop-filter: blur(20px) !important;
@@ -34,26 +31,19 @@ def inject_ui_engine():
             padding: 40px !important;
             box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.8) !important;
         }
-
-        /* Tab Slide-In Animations */
         [data-baseweb="tab-panel"] {
             animation: slideIn 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
         }
-        
         @keyframes slideIn {
             0% { opacity: 0; transform: translateY(30px); filter: blur(5px); }
             100% { opacity: 1; transform: translateY(0); filter: blur(0); }
         }
-
-        /* Dynamic Input Styling */
         input { 
             background: rgba(255, 255, 255, 0.05) !important; 
             border: 1px solid rgba(255, 255, 255, 0.1) !important; 
             color: white !important; 
             border-radius: 10px !important;
         }
-
-        /* Futuristic Button Glow */
         .stButton>button {
             background: linear-gradient(90deg, #00d2ff 0%, #3a7bd5 100%) !important;
             border: none !important;
@@ -71,7 +61,6 @@ def inject_ui_engine():
         </style>
     """, unsafe_allow_html=True)
 
-    # 3D Particles Background (JS)
     components.html("""
         <div id="particles-js" style="position: fixed; width: 100vw; height: 100vh; top: 0; left: 0; z-index: -1;"></div>
         <script src="https://cdn.jsdelivr.net/particles.js/2.0.0/particles.min.js"></script>
@@ -91,7 +80,7 @@ def inject_ui_engine():
         </script>
     """, height=0)
 
-# --- DATABASE ENGINE & AUTO-MIGRATION ---
+# --- DATABASE ENGINE ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -100,12 +89,10 @@ def init_db():
                   plan TEXT, expiry_date TEXT, usage_count INTEGER, receipt_id TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS user_voices 
                  (username TEXT, voice_name TEXT, voice_id TEXT)''')
-    
     c.execute("PRAGMA table_info(users)")
     columns = [column[1] for column in c.fetchall()]
     if "receipt_id" not in columns:
         c.execute("ALTER TABLE users ADD COLUMN receipt_id TEXT DEFAULT 'NONE'")
-    
     conn.commit()
     conn.close()
 
@@ -122,6 +109,19 @@ def upgrade_plan(username, plan_type):
     conn.close()
     return receipt_id, expiry
 
+# --- NEW: PASSWORD RECOVERY LOGIC ---
+def recover_password(u, e, new_p):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE username=? AND email=?", (u, e))
+    if c.fetchone():
+        c.execute("UPDATE users SET password=? WHERE username=?", (hash_pass(new_p), u))
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    return False
+
 # --- UI SETUP ---
 st.set_page_config(page_title="Ultra AI Studio Pro", layout="wide")
 inject_ui_engine()
@@ -136,7 +136,7 @@ if not st.session_state.logged_in:
     with cols[1]:
         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
         st.title("🌐 AI Studio Nexus")
-        auth_action = st.radio("Access Protocol", ["Login", "Sign Up"], horizontal=True)
+        auth_action = st.radio("Access Protocol", ["Login", "Sign Up", "Forgot Password"], horizontal=True)
         
         if auth_action == "Sign Up":
             u = st.text_input("Choose Username")
@@ -152,6 +152,20 @@ if not st.session_state.logged_in:
                     except: st.error("Username already taken!")
                     conn.close()
                 else: st.warning("Password must be exactly 8 characters.")
+        
+        elif auth_action == "Forgot Password":
+            st.subheader("Neural Recovery")
+            u = st.text_input("Target Username")
+            e = st.text_input("Registered Email")
+            new_p = st.text_input("New Password (8 chars)", type="password", max_chars=8)
+            if st.button("Reset Identity Password"):
+                if len(new_p) == 8:
+                    if recover_password(u, e, new_p):
+                        st.success("Identity Updated! You can now Login.")
+                    else:
+                        st.error("Verification Mismatch! Username or Email is incorrect.")
+                else: st.warning("New password must be exactly 8 characters.")
+
         else:
             u = st.text_input("Username")
             p = st.text_input("Password", type="password", max_chars=8)
@@ -186,7 +200,6 @@ else:
             st.session_state.logged_in = False
             st.rerun()
 
-    # Animated Navigation Tabs
     t1, t2, t3, t4 = st.tabs(["🔊 Generator", "🎙️ Cloning", "💳 Subscription", "📄 Billing"])
 
     with t1:
@@ -261,7 +274,6 @@ else:
         
         st.divider()
         st.write("### 📲 Instant UPI Payment")
-        # Dynamic UPI generation based on ₹10 Premium plan
         upi_link = f"upi://pay?pa={ADMIN_MOBILE}@ybl&pn=AI_Studio_Premium&am=10.00&cu=INR"
         st.image(f"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data={upi_link}")
         st.markdown('</div>', unsafe_allow_html=True)
