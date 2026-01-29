@@ -97,7 +97,8 @@ def init_db():
     conn.close()
 
 def hash_pass(password):
-    return hashlib.sha256(str.encode(password[:8])).hexdigest()
+    # Ensure consistent hashing by stripping whitespace
+    return hashlib.sha256(str.encode(password.strip()[:8])).hexdigest()
 
 def upgrade_plan(username, plan_type):
     receipt_id = f"REC-{uuid.uuid4().hex[:8].upper()}"
@@ -109,13 +110,15 @@ def upgrade_plan(username, plan_type):
     conn.close()
     return receipt_id, expiry
 
-# --- NEW: PASSWORD RECOVERY LOGIC ---
+# --- FIX: ROBUST RECOVERY LOGIC ---
 def recover_password(u, e, new_p):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE username=? AND email=?", (u, e))
-    if c.fetchone():
-        c.execute("UPDATE users SET password=? WHERE username=?", (hash_pass(new_p), u))
+    # Using LOWER() to prevent case-sensitivity issues during recovery
+    c.execute("SELECT * FROM users WHERE LOWER(username)=LOWER(?) AND LOWER(email)=LOWER(?)", (u.strip(), e.strip()))
+    user_found = c.fetchone()
+    if user_found:
+        c.execute("UPDATE users SET password=? WHERE username=?", (hash_pass(new_p), user_found[0]))
         conn.commit()
         conn.close()
         return True
@@ -139,47 +142,49 @@ if not st.session_state.logged_in:
         auth_action = st.radio("Access Protocol", ["Login", "Sign Up", "Forgot Password"], horizontal=True)
         
         if auth_action == "Sign Up":
-            u = st.text_input("Choose Username")
-            e = st.text_input("Email Address")
-            p = st.text_input("Create Password (8 chars)", type="password", max_chars=8)
+            u = st.text_input("Choose Username").strip()
+            e = st.text_input("Email Address").strip()
+            p = st.text_input("Create Password (8 chars)", type="password", max_chars=8).strip()
             if st.button("Initialize Account"):
-                if len(p) == 8:
+                if u and e and len(p) == 8:
                     conn = sqlite3.connect(DB_PATH)
                     try:
                         conn.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?)", (u, hash_pass(p), e, "Free", "N/A", 0, "NONE"))
                         conn.commit()
                         st.success("Account created! Switch to Login.")
-                    except: st.error("Username already taken!")
-                    conn.close()
-                else: st.warning("Password must be exactly 8 characters.")
+                    except sqlite3.IntegrityError: 
+                        st.error("Username already taken!")
+                    finally:
+                        conn.close()
+                else: st.warning("Ensure all fields are filled & password is 8 chars.")
         
         elif auth_action == "Forgot Password":
             st.subheader("Neural Recovery")
-            u = st.text_input("Target Username")
-            e = st.text_input("Registered Email")
-            new_p = st.text_input("New Password (8 chars)", type="password", max_chars=8)
+            u_rec = st.text_input("Target Username").strip()
+            e_rec = st.text_input("Registered Email").strip()
+            new_p = st.text_input("New Password (8 chars)", type="password", max_chars=8).strip()
             if st.button("Reset Identity Password"):
-                if len(new_p) == 8:
-                    if recover_password(u, e, new_p):
-                        st.success("Identity Updated! You can now Login.")
+                if u_rec and e_rec and len(new_p) == 8:
+                    if recover_password(u_rec, e_rec, new_p):
+                        st.success("Identity Updated! Login now.")
                     else:
-                        st.error("Verification Mismatch! Username or Email is incorrect.")
-                else: st.warning("New password must be exactly 8 characters.")
+                        st.error("Verification Mismatch! Check Username/Email.")
+                else: st.warning("Fill all fields correctly.")
 
         else:
-            u = st.text_input("Username")
-            p = st.text_input("Password", type="password", max_chars=8)
+            u_log = st.text_input("Username").strip()
+            p_log = st.text_input("Password", type="password", max_chars=8).strip()
             if st.button("Authorize Access"):
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
-                c.execute("SELECT * FROM users WHERE username=? AND password=?", (u, hash_pass(p)))
+                c.execute("SELECT * FROM users WHERE LOWER(username)=LOWER(?) AND password=?", (u_log, hash_pass(p_log)))
                 userData = c.fetchone()
+                conn.close()
                 if userData:
                     st.session_state.logged_in = True
-                    st.session_state.user = u
+                    st.session_state.user = userData[0]
                     st.rerun()
                 else: st.error("Invalid credentials!")
-                conn.close()
         st.markdown('</div>', unsafe_allow_html=True)
 
 # --- MAIN DASHBOARD AREA ---
@@ -274,6 +279,8 @@ else:
         
         st.divider()
         st.write("### 📲 Instant UPI Payment")
+        # UPDATED: UPI Payment Section to show your number clearly
+        st.info(f"Pay to UPI ID / Number: {ADMIN_MOBILE}@ybl")
         upi_link = f"upi://pay?pa={ADMIN_MOBILE}@ybl&pn=AI_Studio_Premium&am=10.00&cu=INR"
         st.image(f"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data={upi_link}")
         st.markdown('</div>', unsafe_allow_html=True)
