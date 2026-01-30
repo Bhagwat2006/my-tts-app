@@ -6,7 +6,6 @@ from supabase import create_client
 import edge_tts
 from gtts import gTTS
 import io
-import os
 
 # -------------------------------------------------
 # PAGE CONFIG
@@ -25,27 +24,12 @@ supabase = create_client(
 )
 
 # -------------------------------------------------
-# PLANS & RULES
+# PLANS
 # -------------------------------------------------
 PLAN_RULES = {
-    "Free": {
-        "edge": 3,
-        "gtts": 0,
-        "eleven": 0,
-        "words": 300
-    },
-    "Standard": {
-        "edge": 10,
-        "gtts": 10,
-        "eleven": 0,
-        "words": 1000
-    },
-    "Premium": {
-        "edge": -1,
-        "gtts": -1,
-        "eleven": -1,
-        "words": -1
-    }
+    "Free": {"edge": 3, "gtts": 0, "eleven": 0, "words": 300},
+    "Standard": {"edge": 10, "gtts": 10, "eleven": 0, "words": 1000},
+    "Premium": {"edge": -1, "gtts": -1, "eleven": -1, "words": -1}
 }
 
 # -------------------------------------------------
@@ -56,7 +40,6 @@ def hash_pass(p):
 
 def reset_daily(user):
     today = str(date.today())
-
     if user.get("last_reset") != today:
         supabase.table("users").update({
             "edge_count": 0,
@@ -69,7 +52,7 @@ def check_limits(user, engine, text):
     rules = PLAN_RULES[user["plan"]]
 
     if rules[engine] == 0:
-        st.error(f"{engine.upper()} is not allowed for your plan.")
+        st.error("This engine is not allowed for your plan.")
         st.stop()
 
     if rules[engine] != -1:
@@ -101,26 +84,92 @@ def gtts_generate(text):
 # -------------------------------------------------
 if "user" not in st.session_state:
     st.session_state.user = None
+if "auth_mode" not in st.session_state:
+    st.session_state.auth_mode = "Login"
 
 # -------------------------------------------------
-# AUTH
+# AUTH (LOGIN / REGISTER / FORGOT)
 # -------------------------------------------------
 if not st.session_state.user:
     st.title("🎙 AI Voice Studio Pro")
 
-    u = st.text_input("Username")
-    p = st.text_input("Password", type="password")
+    if st.session_state.auth_mode == "Login":
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
 
-    if st.button("Login"):
-        res = supabase.table("users").select("*") \
-            .eq("username", u) \
-            .eq("password", hash_pass(p)).execute()
+        if st.button("Login"):
+            res = supabase.table("users").select("*") \
+                .eq("username", u) \
+                .eq("password", hash_pass(p)).execute()
 
-        if res.data:
-            st.session_state.user = u
+            if res.data:
+                st.session_state.user = u
+                st.rerun()
+            else:
+                st.error("Invalid username or password")
+
+        if st.button("New user? Register"):
+            st.session_state.auth_mode = "Register"
             st.rerun()
-        else:
-            st.error("Invalid credentials")
+
+        if st.button("Forgot password"):
+            st.session_state.auth_mode = "Forgot"
+            st.rerun()
+
+    elif st.session_state.auth_mode == "Register":
+        st.subheader("Create Account")
+        u = st.text_input("Choose Username")
+        p1 = st.text_input("Password", type="password")
+        p2 = st.text_input("Confirm Password", type="password")
+
+        if st.button("Create Account"):
+            if p1 != p2:
+                st.error("Passwords do not match")
+            else:
+                exists = supabase.table("users").select("username") \
+                    .eq("username", u).execute()
+                if exists.data:
+                    st.error("Username already exists")
+                else:
+                    supabase.table("users").insert({
+                        "username": u,
+                        "password": hash_pass(p1),
+                        "plan": "Free",
+                        "plan_expiry": date.today() + timedelta(days=30),
+                        "edge_count": 0,
+                        "gtts_count": 0,
+                        "eleven_count": 0,
+                        "last_reset": str(date.today())
+                    }).execute()
+                    st.success("Account created. Please login.")
+                    st.session_state.auth_mode = "Login"
+                    st.rerun()
+
+        if st.button("Back to login"):
+            st.session_state.auth_mode = "Login"
+            st.rerun()
+
+    elif st.session_state.auth_mode == "Forgot":
+        st.subheader("Reset Password")
+        u = st.text_input("Username")
+        new_p = st.text_input("New Password", type="password")
+
+        if st.button("Reset Password"):
+            res = supabase.table("users").select("username") \
+                .eq("username", u).execute()
+            if res.data:
+                supabase.table("users").update({
+                    "password": hash_pass(new_p)
+                }).eq("username", u).execute()
+                st.success("Password updated. Please login.")
+                st.session_state.auth_mode = "Login"
+                st.rerun()
+            else:
+                st.error("User not found")
+
+        if st.button("Back to login"):
+            st.session_state.auth_mode = "Login"
+            st.rerun()
 
     st.stop()
 
@@ -142,6 +191,7 @@ with st.sidebar:
     page = st.radio("Navigate", ["Dashboard", "Studio", "Billing"])
     if st.button("Logout"):
         st.session_state.user = None
+        st.session_state.auth_mode = "Login"
         st.rerun()
 
 # -------------------------------------------------
@@ -149,13 +199,9 @@ with st.sidebar:
 # -------------------------------------------------
 if page == "Dashboard":
     st.header("📊 Dashboard")
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Edge Today", user["edge_count"])
-    col2.metric("gTTS Today", user["gtts_count"])
-    col3.metric("Eleven Today", user["eleven_count"])
-
-    st.info("Usage resets daily automatically.")
+    st.metric("Edge Today", user["edge_count"])
+    st.metric("gTTS Today", user["gtts_count"])
+    st.metric("Eleven Today", user["eleven_count"])
 
 # -------------------------------------------------
 # STUDIO
@@ -163,16 +209,11 @@ if page == "Dashboard":
 elif page == "Studio":
     st.header("🎙 Voice Studio")
 
-    engine = st.selectbox(
-        "Engine",
-        ["edge", "gtts", "eleven"]
-    )
-
-    voice = st.selectbox(
-        "Voice",
-        ["hi-IN-MadhurNeural", "hi-IN-SwaraNeural"]
-    )
-
+    engine = st.selectbox("Engine", ["edge", "gtts", "eleven"])
+    voice = st.selectbox("Voice", [
+        "hi-IN-MadhurNeural",
+        "hi-IN-SwaraNeural"
+    ])
     text = st.text_area("Enter your script")
 
     if st.button("Generate Voice"):
@@ -180,25 +221,22 @@ elif page == "Studio":
 
         if engine == "edge":
             audio = asyncio.run(edge_generate(text, voice))
-            count_key = "edge_count"
-
+            key = "edge_count"
         elif engine == "gtts":
             audio = gtts_generate(text)
-            count_key = "gtts_count"
-
+            key = "gtts_count"
         else:
             if user["plan"] != "Premium":
                 st.error("ElevenLabs is Premium only.")
                 st.stop()
-
-            st.error("ElevenLabs backend can be plugged here.")
+            st.error("ElevenLabs integration placeholder.")
             st.stop()
 
         st.audio(audio)
         st.download_button("Download MP3", audio, "voice.mp3")
 
         supabase.table("users").update({
-            count_key: user[count_key] + 1
+            key: user[key] + 1
         }).eq("username", user["username"]).execute()
 
         st.success("Voice generated successfully.")
@@ -211,9 +249,9 @@ elif page == "Billing":
     st.header("💳 Upgrade Plans")
 
     st.subheader("Standard – ₹49")
-    st.write("✔ More daily usage\n✔ gTTS access")
+    st.write("✔ gTTS access\n✔ Higher limits")
 
     st.subheader("Premium – ₹99")
-    st.write("✔ Unlimited\n✔ ElevenLabs\n✔ No limits")
+    st.write("✔ Unlimited usage\n✔ ElevenLabs\n✔ No restrictions")
 
-    st.info("Payment integration can be added without changing this file.")
+    st.info("Payment gateway can be added without changing this file.")
