@@ -1,95 +1,88 @@
-# =========================================================
-# GLOBAL AI VOICE STUDIO — SINGLE FILE MVP (ENTERPRISE SAFE)
-# =========================================================
-
 import streamlit as st
-import hashlib, asyncio, io, time
-from datetime import date
+import asyncio
+import hashlib
+from datetime import date, timedelta
+from supabase import create_client
 import edge_tts
 from gtts import gTTS
-from supabase import create_client
+import io
+import os
 
-# =========================================================
+# -------------------------------------------------
 # PAGE CONFIG
-# =========================================================
+# -------------------------------------------------
 st.set_page_config(
-    page_title="Global AI Voice Studio",
-    page_icon="🎙️",
+    page_title="AI Voice Studio Pro",
     layout="wide"
 )
 
-# =========================================================
-# THEME TOGGLE
-# =========================================================
-if "theme" not in st.session_state:
-    st.session_state.theme = "light"
-
-with st.sidebar:
-    if st.toggle("🌗 Dark Mode"):
-        st.session_state.theme = "dark"
-
-if st.session_state.theme == "dark":
-    st.markdown("""
-    <style>
-    body { background-color:#0f172a; color:white }
-    </style>
-    """, unsafe_allow_html=True)
-
-# =========================================================
-# SECRETS
-# =========================================================
-for s in ["SUPABASE_URL", "SUPABASE_KEY"]:
-    if s not in st.secrets:
-        st.error(f"Missing secret: {s}")
-        st.stop()
-
-# =========================================================
+# -------------------------------------------------
 # DATABASE
-# =========================================================
-@st.cache_resource
-def db():
-    return create_client(
-        st.secrets["SUPABASE_URL"],
-        st.secrets["SUPABASE_KEY"]
-    )
+# -------------------------------------------------
+supabase = create_client(
+    st.secrets["SUPABASE_URL"],
+    st.secrets["SUPABASE_KEY"]
+)
 
-supabase = db()
-
-# =========================================================
-# PLANS & LIMITS
-# =========================================================
-PLANS = {
-    "Free": {"edge": 3, "words": 300},
-    "Standard": {"edge": 10, "gtts": 10, "words": 1000},
-    "Premium": {"edge": -1, "gtts": -1, "eleven": -1}
+# -------------------------------------------------
+# PLANS & RULES
+# -------------------------------------------------
+PLAN_RULES = {
+    "Free": {
+        "edge": 3,
+        "gtts": 0,
+        "eleven": 0,
+        "words": 300
+    },
+    "Standard": {
+        "edge": 10,
+        "gtts": 10,
+        "eleven": 0,
+        "words": 1000
+    },
+    "Premium": {
+        "edge": -1,
+        "gtts": -1,
+        "eleven": -1,
+        "words": -1
+    }
 }
 
-# =========================================================
+# -------------------------------------------------
 # HELPERS
-# =========================================================
-def hash_pw(p): return hashlib.sha256(p.encode()).hexdigest()
+# -------------------------------------------------
+def hash_pass(p):
+    return hashlib.sha256(p.encode()).hexdigest()
 
 def reset_daily(user):
-    if user["last_reset"] != str(date.today()):
+    today = str(date.today())
+
+    if user.get("last_reset") != today:
         supabase.table("users").update({
             "edge_count": 0,
             "gtts_count": 0,
             "eleven_count": 0,
-            "last_reset": str(date.today())
+            "last_reset": today
         }).eq("username", user["username"]).execute()
 
-def rate_limit():
-    now = time.time()
-    last = st.session_state.get("last_req", 0)
-    if now - last < 2:
-        st.error("Too many requests. Slow down.")
-        st.stop()
-    st.session_state.last_req = now
+def check_limits(user, engine, text):
+    rules = PLAN_RULES[user["plan"]]
 
-# =========================================================
-# VOICE ENGINES
-# =========================================================
-async def edge_voice(text, voice):
+    if rules[engine] == 0:
+        st.error(f"{engine.upper()} is not allowed for your plan.")
+        st.stop()
+
+    if rules[engine] != -1:
+        count_key = f"{engine}_count"
+        if user[count_key] >= rules[engine]:
+            st.error("Daily limit reached.")
+            st.stop()
+
+    if rules["words"] != -1 and len(text.split()) > rules["words"]:
+        st.error("Word limit exceeded.")
+        st.stop()
+
+async def edge_generate(text, voice):
     tts = edge_tts.Communicate(text, voice)
     audio = b""
     async for c in tts.stream():
@@ -97,144 +90,130 @@ async def edge_voice(text, voice):
             audio += c["data"]
     return audio
 
-def generate(engine, text, voice):
-    if engine == "edge":
-        return asyncio.run(edge_voice(text, voice))
-    if engine == "gtts":
-        buf = io.BytesIO()
-        gTTS(text).write_to_fp(buf)
-        return buf.getvalue()
-    st.error("ElevenLabs enabled in backend phase only")
-    st.stop()
+def gtts_generate(text):
+    fp = io.BytesIO()
+    tts = gTTS(text)
+    tts.write_to_fp(fp)
+    return fp.getvalue()
 
-# =========================================================
+# -------------------------------------------------
 # SESSION
-# =========================================================
-for k in ["user", "page"]:
-    st.session_state.setdefault(k, None)
+# -------------------------------------------------
+if "user" not in st.session_state:
+    st.session_state.user = None
 
-# =========================================================
+# -------------------------------------------------
 # AUTH
-# =========================================================
+# -------------------------------------------------
 if not st.session_state.user:
-    st.title("🎙 Global AI Voice Studio")
+    st.title("🎙 AI Voice Studio Pro")
 
     u = st.text_input("Username")
     p = st.text_input("Password", type="password")
 
     if st.button("Login"):
-        res = supabase.table("users").select("*")\
-            .eq("username", u)\
-            .eq("password", hash_pw(p)).execute()
+        res = supabase.table("users").select("*") \
+            .eq("username", u) \
+            .eq("password", hash_pass(p)).execute()
+
         if res.data:
             st.session_state.user = u
-            st.session_state.page = "Dashboard"
             st.rerun()
         else:
-            st.error("Invalid login")
+            st.error("Invalid credentials")
 
-    st.caption("🔐 Email verification & signup in next phase")
     st.stop()
 
-# =========================================================
+# -------------------------------------------------
 # LOAD USER
-# =========================================================
-user = supabase.table("users").select("*")\
+# -------------------------------------------------
+user = supabase.table("users").select("*") \
     .eq("username", st.session_state.user).execute().data[0]
 
 reset_daily(user)
 
-# =========================================================
+# -------------------------------------------------
 # SIDEBAR
-# =========================================================
+# -------------------------------------------------
 with st.sidebar:
-    st.markdown(f"### 👋 {user['username']}")
-    st.caption(f"Plan: **{user['plan']}**")
-
-    for p in ["Dashboard", "Studio", "Billing"]:
-        if st.button(p):
-            st.session_state.page = p
-
+    st.subheader(f"👋 {user['username']}")
+    st.write("Plan:", user["plan"])
+    st.write("Expires:", user["plan_expiry"])
+    page = st.radio("Navigate", ["Dashboard", "Studio", "Billing"])
     if st.button("Logout"):
         st.session_state.user = None
         st.rerun()
 
-# =========================================================
+# -------------------------------------------------
 # DASHBOARD
-# =========================================================
-if st.session_state.page == "Dashboard":
-    st.header("📊 Usage Dashboard")
+# -------------------------------------------------
+if page == "Dashboard":
+    st.header("📊 Dashboard")
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Plan", user["plan"])
-    c2.metric("Total Requests", user["usage_count"])
-    c3.metric("Today", user["last_reset"])
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Edge Today", user["edge_count"])
+    col2.metric("gTTS Today", user["gtts_count"])
+    col3.metric("Eleven Today", user["eleven_count"])
 
-    st.subheader("Engine Usage Today")
-    st.bar_chart({
-        "Edge": user["edge_count"],
-        "gTTS": user["gtts_count"],
-        "ElevenLabs": user["eleven_count"]
-    })
+    st.info("Usage resets daily automatically.")
 
-    st.caption("Admin analytics hooks ready")
-
-# =========================================================
+# -------------------------------------------------
 # STUDIO
-# =========================================================
-elif st.session_state.page == "Studio":
-    st.header("🎧 Voice Studio")
+# -------------------------------------------------
+elif page == "Studio":
+    st.header("🎙 Voice Studio")
 
-    engine = st.selectbox("Engine", ["edge", "gtts", "eleven"])
-    voice = st.text_input("Voice", "hi-IN-MadhurNeural")
-    text = st.text_area("Text")
+    engine = st.selectbox(
+        "Engine",
+        ["edge", "gtts", "eleven"]
+    )
 
-    if st.button("Generate"):
-        rate_limit()
+    voice = st.selectbox(
+        "Voice",
+        ["hi-IN-MadhurNeural", "hi-IN-SwaraNeural"]
+    )
 
-        plan = PLANS[user["plan"]]
-        if engine not in plan and plan.get(engine, 0) != -1:
-            st.error("Engine not available on your plan")
+    text = st.text_area("Enter your script")
+
+    if st.button("Generate Voice"):
+        check_limits(user, engine, text)
+
+        if engine == "edge":
+            audio = asyncio.run(edge_generate(text, voice))
+            count_key = "edge_count"
+
+        elif engine == "gtts":
+            audio = gtts_generate(text)
+            count_key = "gtts_count"
+
+        else:
+            if user["plan"] != "Premium":
+                st.error("ElevenLabs is Premium only.")
+                st.stop()
+
+            st.error("ElevenLabs backend can be plugged here.")
             st.stop()
-
-        if plan.get("words", 999999) < len(text.split()):
-            st.error("Word limit exceeded")
-            st.stop()
-
-        audio = generate(engine, text, voice)
 
         st.audio(audio)
         st.download_button("Download MP3", audio, "voice.mp3")
 
         supabase.table("users").update({
-            f"{engine}_count": user[f"{engine}_count"] + 1,
-            "usage_count": user["usage_count"] + 1
+            count_key: user[count_key] + 1
         }).eq("username", user["username"]).execute()
 
-        st.success("Voice generated")
+        st.success("Voice generated successfully.")
+        st.rerun()
 
-# =========================================================
+# -------------------------------------------------
 # BILLING
-# =========================================================
-elif st.session_state.page == "Billing":
-    st.header("💳 Upgrade Plan")
+# -------------------------------------------------
+elif page == "Billing":
+    st.header("💳 Upgrade Plans")
 
-    st.markdown("""
-    ### Premium – ₹99/month
-    - Unlimited usage
-    - All engines
-    - No limits
-    - API access (coming soon)
-    """)
+    st.subheader("Standard – ₹49")
+    st.write("✔ More daily usage\n✔ gTTS access")
 
-    st.info("Stripe / Razorpay auto-upgrade enabled in backend phase")
+    st.subheader("Premium – ₹99")
+    st.write("✔ Unlimited\n✔ ElevenLabs\n✔ No limits")
 
-# =========================================================
-# DEPLOYMENT NOTES
-# =========================================================
-st.caption("""
-Deployment ready:
-• Streamlit Cloud
-• AWS EC2 + Nginx
-• Secrets via environment variables
-""")
+    st.info("Payment integration can be added without changing this file.")
