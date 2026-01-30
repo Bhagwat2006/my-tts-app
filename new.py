@@ -1,251 +1,265 @@
-# =========================================================
-# GLOBAL AI STUDIO PRO – ENTERPRISE SINGLE FILE
-# Author: Senior SaaS Architecture Pattern
-# =========================================================
+# ==============================
+# GLOBAL AI STUDIO PRO (PROD)
+# ==============================
 
-import os, time, hmac, hashlib, asyncio, secrets, logging
+import os
+import hashlib
+import asyncio
+import logging
 from datetime import datetime
+
 import streamlit as st
 import pandas as pd
 import edge_tts
-from supabase import create_client
+from supabase import create_client, Client
+from elevenlabs.client import ElevenLabs
 
-# =========================================================
-# PAGE CONFIG
-# =========================================================
+# ------------------------------
+# APP CONFIG
+# ------------------------------
 st.set_page_config(
     page_title="Global AI Studio Pro",
     page_icon="🎙️",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# =========================================================
-# LOGGING (PRODUCTION)
-# =========================================================
-logging.basicConfig(level=logging.INFO)
+# ------------------------------
+# LOGGING (PRODUCTION LEVEL)
+# ------------------------------
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.INFO
+)
 
-# =========================================================
+# ------------------------------
+# SECURITY CONSTANTS
+# ------------------------------
+ADMIN_PASSWORD = "ADMIN@123"
+UPI_ID = "8452095418@ybl"
+
+# ------------------------------
 # SECRETS VALIDATION
-# =========================================================
-REQUIRED_SECRETS = [
-    "SUPABASE_URL",
-    "SUPABASE_KEY",
-    "ELEVEN_API_KEY",
-    "RAZORPAY_KEY_SECRET"
-]
-missing = [s for s in REQUIRED_SECRETS if s not in st.secrets]
+# ------------------------------
+REQUIRED_SECRETS = ["SUPABASE_URL", "SUPABASE_KEY", "ELEVEN_API_KEY"]
+missing = [k for k in REQUIRED_SECRETS if k not in st.secrets]
 if missing:
     st.error(f"Missing secrets: {', '.join(missing)}")
     st.stop()
 
-# =========================================================
-# CONSTANTS
-# =========================================================
-ADMIN_PASSWORD = "ADMIN@123"
-UPI_ID = "8452095418@ybl"
-
-PLAN_LIMITS = {
-    "Free": 10,
-    "Standard": 100,
-    "Premium": 1000
-}
-
-VOICE_MODELS = {
-    "Madhur (Male)": {
-        "id": "hi-IN-MadhurNeural",
-        "preview": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
-    },
-    "Swara (Female)": {
-        "id": "hi-IN-SwaraNeural",
-        "preview": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3"
-    },
-    "Adam (EN)": {
-        "id": "en-US-AdamMultilingual",
-        "preview": "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3"
-    }
-}
-
-# =========================================================
+# ------------------------------
 # DATABASE
-# =========================================================
-@st.cache_resource
-def get_db():
+# ------------------------------
+@st.cache_resource(show_spinner=False)
+def get_supabase() -> Client:
     return create_client(
         st.secrets["SUPABASE_URL"],
         st.secrets["SUPABASE_KEY"]
     )
 
-supabase = get_db()
+supabase = get_supabase()
 
-# =========================================================
-# SECURITY UTILITIES
-# =========================================================
-def hash_password(p):
+# ------------------------------
+# VOICE CLIENT
+# ------------------------------
+eleven_client = ElevenLabs(api_key=st.secrets["ELEVEN_API_KEY"])
+
+VOICE_MODELS = {
+    "Madhur (Male)": {"id": "hi-IN-MadhurNeural", "lang": "Hindi"},
+    "Swara (Female)": {"id": "hi-IN-SwaraNeural", "lang": "Hindi"},
+    "English - Adam": {"id": "en-US-AdamMultilingual", "lang": "English"},
+    "English - Bella": {"id": "en-US-BellaNeural", "lang": "English"},
+}
+
+# ------------------------------
+# UTILITIES
+# ------------------------------
+def hash_password(p: str) -> str:
     return hashlib.sha256(p.encode()).hexdigest()
 
-def rate_limit(key, limit=5, window=60):
-    now = time.time()
-    history = st.session_state.get(key, [])
-    history = [t for t in history if now - t < window]
-    if len(history) >= limit:
-        return False
-    history.append(now)
-    st.session_state[key] = history
-    return True
-
-def check_usage(user):
-    if user["usage_count"] >= PLAN_LIMITS.get(user["plan"], 0):
-        st.error("Usage limit reached. Please upgrade.")
+def require_login():
+    if not st.session_state.get("user"):
+        st.warning("Please login to continue.")
         st.stop()
 
-# =========================================================
-# VOICE ENGINE (SAFE ASYNC)
-# =========================================================
-async def _tts(text, voice, rate, pitch):
+def safe_rerun():
+    st.experimental_set_query_params()
+    st.rerun()
+
+# ------------------------------
+# ASYNC VOICE ENGINE (SAFE)
+# ------------------------------
+async def _edge_tts(text, voice, rate, pitch):
     tts = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
     audio = b""
-    async for c in tts.stream():
-        if c["type"] == "audio":
-            audio += c["data"]
+    async for chunk in tts.stream():
+        if chunk["type"] == "audio":
+            audio += chunk["data"]
     return audio
 
-def generate_audio(text, voice, rate, pitch):
-    return asyncio.run(_tts(text, voice, rate, pitch))
+def generate_voice_sync(text, voice, rate, pitch):
+    return asyncio.run(_edge_tts(text, voice, rate, pitch))
 
-# =========================================================
-# SESSION INIT
-# =========================================================
-defaults = {
+# ------------------------------
+# SESSION STATE INIT
+# ------------------------------
+for key, default in {
     "user": None,
     "page": "Studio",
-    "theme": "Dark",
-    "voice_id": list(VOICE_MODELS.values())[0]["id"],
-    "voice_history": []
-}
-for k, v in defaults.items():
-    st.session_state.setdefault(k, v)
+    "auth_mode": "Login",
+    "voice_id": "hi-IN-MadhurNeural"
+}.items():
+    st.session_state.setdefault(key, default)
 
-# =========================================================
-# THEME TOGGLE
-# =========================================================
-if st.sidebar.toggle("🌗 Dark Mode", value=True):
-    st.markdown("<style>body{background:#0f0c29;color:white}</style>", unsafe_allow_html=True)
-else:
-    st.markdown("<style>body{background:white;color:black}</style>", unsafe_allow_html=True)
-
-# =========================================================
-# AUTH
-# =========================================================
+# ==============================
+# AUTHENTICATION
+# ==============================
 if not st.session_state.user:
-    st.title("🚀 Global AI Studio Pro")
+    st.markdown("## 🚀 Global AI Studio Pro")
 
-    u = st.text_input("Username")
-    p = st.text_input("Password", type="password")
+    if st.session_state.auth_mode == "Login":
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
 
-    if st.button("Login"):
-        res = supabase.table("users").select("*")\
-            .eq("username", u)\
-            .eq("password", hash_password(p)).execute()
-        if res.data:
-            st.session_state.user = u
-            st.rerun()
-        else:
-            st.error("Invalid credentials")
+        if st.button("Login", use_container_width=True):
+            res = supabase.table("users").select("*")\
+                .eq("username", u)\
+                .eq("password", hash_password(p))\
+                .execute()
+
+            if res.data:
+                st.session_state.user = u
+                safe_rerun()
+            else:
+                st.error("Invalid credentials")
+
+        col1, col2 = st.columns(2)
+        if col1.button("Register"):
+            st.session_state.auth_mode = "Register"
+            safe_rerun()
+        if col2.button("Forgot Password"):
+            st.session_state.auth_mode = "Forgot"
+            safe_rerun()
+
+    elif st.session_state.auth_mode == "Register":
+        st.subheader("Create Account")
+        u = st.text_input("Username")
+        p1 = st.text_input("Password", type="password")
+        p2 = st.text_input("Confirm Password", type="password")
+
+        if st.button("Sign Up"):
+            if p1 != p2:
+                st.error("Passwords mismatch")
+            else:
+                exists = supabase.table("users").select("username").eq("username", u).execute()
+                if exists.data:
+                    st.error("Username already exists")
+                else:
+                    supabase.table("users").insert({
+                        "username": u,
+                        "password": hash_password(p1),
+                        "plan": "Free",
+                        "usage_count": 0
+                    }).execute()
+                    st.success("Account created. Please login.")
+                    st.session_state.auth_mode = "Login"
+                    safe_rerun()
+
+        if st.button("Back"):
+            st.session_state.auth_mode = "Login"
+            safe_rerun()
+
+    elif st.session_state.auth_mode == "Forgot":
+        st.info("Contact admin for manual reset")
+        if st.button("Back"):
+            st.session_state.auth_mode = "Login"
+            safe_rerun()
 
     st.stop()
 
-# =========================================================
-# LOAD USER
-# =========================================================
-user = supabase.table("users").select("*")\
+# ==============================
+# MAIN APP
+# ==============================
+require_login()
+
+user_row = supabase.table("users").select("*")\
     .eq("username", st.session_state.user).execute().data[0]
 
-# =========================================================
+# ------------------------------
 # SIDEBAR
-# =========================================================
+# ------------------------------
 with st.sidebar:
-    st.markdown(f"### 👋 {user['username']}")
-    st.caption(f"Plan: {user['plan']}")
-    st.caption(f"Usage: {user['usage_count']}")
+    st.markdown(f"### 👋 {st.session_state.user}")
+    st.caption(f"Plan: {user_row['plan']}")
+    st.caption(f"Usage: {user_row['usage_count']}")
 
-    if st.button("🎙 Studio"): st.session_state.page = "Studio"
-    if st.button("💳 Billing"): st.session_state.page = "Billing"
-    if st.button("📊 Admin"): st.session_state.page = "Admin"
-    if st.button("🚪 Logout"):
+    for label, page in [
+        ("🎙 Studio", "Studio"),
+        ("💳 Billing", "Billing"),
+        ("🛠 Admin", "Admin")
+    ]:
+        if st.button(label, use_container_width=True):
+            st.session_state.page = page
+            safe_rerun()
+
+    if st.button("🚪 Logout", use_container_width=True):
         st.session_state.user = None
-        st.rerun()
+        safe_rerun()
 
-# =========================================================
-# STUDIO
-# =========================================================
+# ==============================
+# STUDIO PAGE
+# ==============================
 if st.session_state.page == "Studio":
     st.header("🎙 Advanced Voice Lab")
 
+    st.subheader("Select Voice")
     cols = st.columns(len(VOICE_MODELS))
     for i, (name, v) in enumerate(VOICE_MODELS.items()):
         with cols[i]:
-            st.markdown(name)
-            st.audio(v["preview"])
-            if st.button("Select", key=name):
+            if st.button(name, use_container_width=True):
                 st.session_state.voice_id = v["id"]
 
-    text = st.text_area("Script")
+    text = st.text_area("Script", height=180)
     speed = st.slider("Speed", 0.5, 2.0, 1.0)
     pitch = st.slider("Pitch", -20, 20, 0)
 
-    if st.button("⚡ Generate"):
-        if not rate_limit("gen"):
-            st.error("Too many requests. Slow down.")
-            st.stop()
+    if st.button("⚡ Generate Audio", type="primary"):
+        if not text.strip():
+            st.warning("Enter script text")
+        else:
+            with st.spinner("Generating audio..."):
+                audio = generate_voice_sync(
+                    text,
+                    st.session_state.voice_id,
+                    f"{int((speed-1)*100)}%",
+                    f"{pitch}Hz"
+                )
 
-        check_usage(user)
+                st.audio(audio)
+                st.download_button("Download MP3", audio, "voice.mp3")
 
-        audio = generate_audio(
-            text,
-            st.session_state.voice_id,
-            f"{int((speed-1)*100)}%",
-            f"{pitch}Hz"
-        )
+                supabase.table("users").update({
+                    "usage_count": user_row["usage_count"] + 1
+                }).eq("username", st.session_state.user).execute()
 
-        st.audio(audio)
-        st.download_button("Download", audio, "voice.mp3")
+                safe_rerun()
 
-        st.session_state.voice_history.append({
-            "time": datetime.utcnow(),
-            "audio": audio
-        })
-
-        supabase.table("users").update({
-            "usage_count": user["usage_count"] + 1
-        }).eq("username", user["username"]).execute()
-
-        st.rerun()
-
-    with st.expander("🎧 Voice History"):
-        for v in st.session_state.voice_history[::-1]:
-            st.audio(v["audio"])
-
-# =========================================================
+# ==============================
 # BILLING
-# =========================================================
+# ==============================
 elif st.session_state.page == "Billing":
     st.header("💳 Upgrade Plan")
     st.image(
         f"https://api.qrserver.com/v1/create-qr-code/?data=upi://pay?pa={UPI_ID}",
         width=250
     )
-    st.info("After payment, admin will verify & upgrade automatically.")
 
-# =========================================================
+# ==============================
 # ADMIN
-# =========================================================
+# ==============================
 elif st.session_state.page == "Admin":
-    st.header("🛡 Admin Dashboard")
-    key = st.text_input("Admin Key", type="password")
+    st.header("🛡 Admin Panel")
+    key = st.text_input("Master Key", type="password")
     if key == ADMIN_PASSWORD:
-        users = supabase.table("users").select("*").execute().data
-        df = pd.DataFrame(users)
-        st.metric("Total Users", len(df))
-        st.metric("Total Usage", df["usage_count"].sum())
-        st.bar_chart(df.groupby("plan")["usage_count"].sum())
-        st.dataframe(df)
+        users = supabase.table("users").select("*").execute()
+        st.dataframe(pd.DataFrame(users.data), use_container_width=True)
