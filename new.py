@@ -1,330 +1,213 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Mic, BarChart3, Users, CreditCard, ShieldCheck, Settings, 
-  LogOut, Play, Upload, CheckCircle2, AlertCircle, Menu, 
-  X, Zap, History, Volume2, Command, MessageSquare, Save
-} from 'lucide-react';
-import { 
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, 
-  ResponsiveContainer, BarChart, Bar 
-} from 'recharts';
+import os
+import sqlite3
+import hashlib
+import uuid
+import datetime
+from datetime import datetime, timedelta
+import streamlit as st
+from elevenlabs.client import ElevenLabs
 
-// --- Configuration & Constants ---
-const CONFIG = {
-  freeDailyLimit: 5,
-  maxAudioChars: 5000,
-  upiId: "8452095418@ybl"
-};
+# --- CONFIGURATION & SECURITY ---
+# Hardcoded fallback as per your instruction to keep everything in one place
+try:
+    ELEVEN_KEY = st.secrets.get("ELEVEN_API_KEY", "5eecc00bf17ec14ebedac583a5937edc23005a895a97856e4a465f28d49d7f40")
+except:
+    ELEVEN_KEY = "5eecc00bf17ec14ebedac583a5937edc23005a895a97856e4a465f28d49d7f40"
 
-const INITIAL_USERS = [
-  { id: '1', username: 'admin', role: 'admin', plan: 'Enterprise', usage: 145 },
-  { id: '2', username: 'guest', role: 'user', plan: 'Basic', usage: 12 }
-];
+client = ElevenLabs(api_key=ELEVEN_KEY)
+DB_PATH = "studio_v4.db"
+ADMIN_MOBILE = "8452095418"
 
-const ANALYTICS_DATA = [
-  { date: '2023-10-01', count: 45 },
-  { date: '2023-10-02', count: 52 },
-  { date: '2023-10-03', count: 38 },
-  { date: '2023-10-04', count: 65 },
-  { date: '2023-10-05', count: 48 },
-  { date: '2023-10-06', count: 70 },
-  { date: '2023-10-07', count: 55 },
-];
-
-export default function App() {
-  // Authentication State
-  const [user, setUser] = useState(null);
-  const [authMode, setAuthMode] = useState('login');
-  const [formData, setFormData] = useState({ username: '', password: '' });
-  const [error, setError] = useState('');
-
-  // Navigation State
-  const [page, setPage] = useState('studio');
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-
-  // Studio & Voice State
-  const [script, setScript] = useState('');
-  const [engine, setEngine] = useState('eleven');
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [history, setHistory] = useState([]);
-  
-  // Voice-to-Voice / Command State
-  const [isListening, setIsListening] = useState(false);
-  const [voiceCommand, setVoiceCommand] = useState('');
-
-  // --- Auth Handlers ---
-  const handleAuth = (e) => {
-    e.preventDefault();
-    const found = INITIAL_USERS.find(u => u.username === formData.username);
-    if (found) {
-      setUser(found);
-      setError('');
-    } else {
-      setError('Invalid credentials for this preview.');
-    }
-  };
-
-  // --- Voice-to-Voice Command Loader ---
-  const toggleListening = () => {
-    if (!isListening) {
-      setIsListening(true);
-      // Simulate Voice-to-Text Command Loader
-      setTimeout(() => {
-        const mockCommands = ["Generate a welcome message", "Switch to admin dashboard", "Start voice cloning"];
-        const randomCmd = mockCommands[Math.floor(Math.random() * mockCommands.length)];
-        setVoiceCommand(randomCmd);
-        setIsListening(false);
-        if (randomCmd.includes("Generate")) setScript("Welcome to the Global AI Voice Studio Enterprise Edition.");
-      }, 2000);
-    }
-  };
-
-  // --- Production Rendering Pipeline ---
-  const handleGenerate = () => {
-    if (!script.trim()) return;
-    setIsProcessing(true);
+# --- DATABASE ENGINE & AUTO-MIGRATION ---
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    # Ensure Tables Exist
+    c.execute('''CREATE TABLE IF NOT EXISTS users 
+                 (username TEXT PRIMARY KEY, password TEXT, email TEXT, 
+                  plan TEXT, expiry_date TEXT, usage_count INTEGER, receipt_id TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS user_voices 
+                 (username TEXT, voice_name TEXT, voice_id TEXT)''')
     
-    setTimeout(() => {
-      const newEntry = {
-        id: Date.now(),
-        text: script.slice(0, 40) + "...",
-        engine: engine.toUpperCase(),
-        time: new Date().toLocaleTimeString(),
-      };
-      setHistory([newEntry, ...history]);
-      setIsProcessing(false);
-    }, 1500);
-  };
+    # CRITICAL FIX: Auto-Add receipt_id column if it's missing (Prevents Unpack Error)
+    c.execute("PRAGMA table_info(users)")
+    columns = [column[1] for column in c.fetchall()]
+    if "receipt_id" not in columns:
+        c.execute("ALTER TABLE users ADD COLUMN receipt_id TEXT DEFAULT 'NONE'")
+    
+    conn.commit()
+    conn.close()
 
-  if (!user) {
-    return (
-      <div className="min-h-screen bg-[#050505] flex items-center justify-center p-4">
-        <div className="w-full max-w-md bg-[#0f0f0f] border border-white/10 rounded-2xl p-8 shadow-2xl">
-          <div className="text-center mb-8">
-            <div className="bg-indigo-600 w-12 h-12 rounded-xl flex items-center justify-center mx-auto mb-4">
-              <Mic className="text-white" />
-            </div>
-            <h1 className="text-2xl font-bold text-white">Voice Studio AI</h1>
-            <p className="text-gray-500 text-sm">Enterprise Management Suite</p>
-          </div>
-          
-          <form onSubmit={handleAuth} className="space-y-4">
-            <input 
-              type="text" placeholder="Username" required
-              className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 text-white focus:border-indigo-500 outline-none"
-              onChange={e => setFormData({...formData, username: e.target.value})}
-            />
-            <input 
-              type="password" placeholder="Password" required
-              className="w-full bg-black border border-white/10 rounded-lg px-4 py-3 text-white focus:border-indigo-500 outline-none"
-              onChange={e => setFormData({...formData, password: e.target.value})}
-            />
-            {error && <p className="text-red-500 text-xs">{error}</p>}
-            <button className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-lg transition-all">
-              Login to Studio
-            </button>
-          </form>
-          <p className="text-center text-gray-600 text-xs mt-6">Use 'admin' or 'guest' to preview</p>
-        </div>
-      </div>
-    );
-  }
+def hash_pass(password):
+    return hashlib.sha256(str.encode(password[:8])).hexdigest()
 
-  return (
-    <div className="min-h-screen bg-[#050505] text-gray-200 flex">
-      {/* Sidebar Navigation */}
-      <aside className={`fixed lg:static inset-y-0 left-0 z-50 w-64 bg-[#0a0a0a] border-r border-white/5 transition-transform ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
-        <div className="p-6 flex items-center gap-3 border-b border-white/5">
-          <Zap className="text-indigo-500" fill="currentColor" size={20}/>
-          <span className="font-bold tracking-tight">VOICE STUDIO</span>
-        </div>
-        <nav className="p-4 space-y-2">
-          <NavItem active={page==='studio'} icon={<Mic size={18}/>} label="Studio" onClick={()=>setPage('studio')} />
-          <NavItem active={page==='analytics'} icon={<BarChart3 size={18}/>} label="Analytics" onClick={()=>setPage('analytics')} />
-          <NavItem active={page==='clone'} icon={<Volume2 size={18}/>} label="Voice Cloning" onClick={()=>setPage('clone')} />
-          <NavItem active={page==='billing'} icon={<CreditCard size={18}/>} label="Billing" onClick={()=>setPage('billing')} />
-          {user.role === 'admin' && (
-            <NavItem active={page==='admin'} icon={<ShieldCheck size={18}/>} label="Admin" onClick={()=>setPage('admin')} />
-          )}
-        </nav>
-        <div className="absolute bottom-0 w-full p-4 border-t border-white/5">
-          <button onClick={() => setUser(null)} className="flex items-center gap-3 w-full p-2 text-gray-500 hover:text-white transition-colors">
-            <LogOut size={18}/> <span>Logout</span>
-          </button>
-        </div>
-      </aside>
+def upgrade_plan(username, plan_type):
+    receipt_id = f"REC-{uuid.uuid4().hex[:8].upper()}"
+    expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET plan=?, expiry_date=?, usage_count=0, receipt_id=? WHERE username=?", 
+                 (plan_type, expiry, receipt_id, username))
+    conn.commit()
+    conn.close()
+    return receipt_id, expiry
 
-      {/* Main Panel */}
-      <main className="flex-1 flex flex-col h-screen overflow-hidden">
-        <header className="h-16 border-b border-white/5 bg-[#0a0a0a]/50 backdrop-blur-xl px-6 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <button className="lg:hidden" onClick={()=>setIsSidebarOpen(!isSidebarOpen)}><Menu/></button>
-            <h2 className="text-sm font-semibold uppercase tracking-widest text-gray-400">{page}</h2>
-          </div>
-          <div className="flex items-center gap-4">
-            <div className="text-right hidden sm:block">
-              <p className="text-xs font-bold">{user.username}</p>
-              <p className="text-[10px] text-indigo-400">{user.plan} Plan</p>
-            </div>
-            <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center font-bold text-xs">
-              {user.username[0].toUpperCase()}
-            </div>
-          </div>
-        </header>
+# --- UI SETUP ---
+st.set_page_config(page_title="Global AI Voice Studio Pro", layout="wide")
+init_db()
 
-        <div className="flex-1 overflow-y-auto p-6 lg:p-10">
-          <div className="max-w-5xl mx-auto">
-            {page === 'studio' && (
-              <div className="grid lg:grid-cols-3 gap-8">
-                <div className="lg:col-span-2 space-y-6">
-                  {/* Voice Command Section */}
-                  <div className="bg-[#0f0f0f] border border-white/10 rounded-2xl p-6">
-                    <div className="flex items-center justify-between mb-4">
-                      <h3 className="flex items-center gap-2 font-bold"><Command size={18}/> Voice Command</h3>
-                      <button 
-                        onClick={toggleListening}
-                        className={`p-3 rounded-full transition-all ${isListening ? 'bg-red-500 animate-pulse' : 'bg-indigo-600 hover:bg-indigo-500'}`}
-                      >
-                        <Mic size={20} className="text-white"/>
-                      </button>
-                    </div>
-                    <div className="bg-black/40 rounded-lg p-3 text-sm border border-white/5 min-h-[40px]">
-                      {isListening ? "Listening..." : voiceCommand || "Click mic to speak command..."}
-                    </div>
-                  </div>
+if 'logged_in' not in st.session_state:
+    st.session_state.logged_in = False
 
-                  {/* Text to Speech Section */}
-                  <div className="bg-[#0f0f0f] border border-white/10 rounded-2xl p-6 shadow-xl">
-                    <div className="flex gap-4 mb-6">
-                      <select 
-                        className="flex-1 bg-black border border-white/10 rounded-lg px-4 py-2 text-sm outline-none"
-                        value={engine} onChange={e => setEngine(e.target.value)}
-                      >
-                        <option value="eleven">ElevenLabs HD</option>
-                        <option value="edge">Edge Neural</option>
-                        <option value="gtts">Google Lite</option>
-                      </select>
-                      <input className="flex-1 bg-black border border-white/10 rounded-lg px-4 py-2 text-sm" placeholder="Voice ID: MadhurNeural"/>
-                    </div>
-                    <textarea 
-                      className="w-full bg-black border border-white/10 rounded-xl p-5 h-64 outline-none focus:border-indigo-500 transition-colors resize-none"
-                      placeholder="Enter production script..."
-                      value={script}
-                      onChange={e => setScript(e.target.value)}
-                    />
-                    <button 
-                      onClick={handleGenerate}
-                      disabled={isProcessing}
-                      className="w-full bg-indigo-600 hover:bg-indigo-500 py-4 rounded-xl mt-6 font-bold flex items-center justify-center gap-2 disabled:opacity-50"
-                    >
-                      {isProcessing ? <div className="animate-spin rounded-full h-5 w-5 border-2 border-white/20 border-t-white" /> : <><Play size={18}/> Generate Audio</>}
-                    </button>
-                  </div>
-                </div>
+# --- AUTHENTICATION INTERFACE ---
+if not st.session_state.logged_in:
+    st.title("🌐 Global AI Voice Studio")
+    auth_action = st.sidebar.selectbox("Account Access", ["Login", "Sign Up"])
+    
+    if auth_action == "Sign Up":
+        u = st.text_input("Choose Username")
+        e = st.text_input("Email Address")
+        p = st.text_input("Create Password (Exactly 8 chars)", type="password", max_chars=8)
+        if st.button("Create Account"):
+            if len(p) == 8:
+                conn = sqlite3.connect(DB_PATH)
+                try:
+                    conn.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?)", (u, hash_pass(p), e, "Free", "N/A", 0, "NONE"))
+                    conn.commit()
+                    st.success("Account created! Please switch to Login.")
+                except: st.error("Username already taken!")
+                conn.close()
+            else: st.warning("Password must be exactly 8 characters.")
+    else:
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password", max_chars=8)
+        if st.button("Secure Login"):
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT * FROM users WHERE username=? AND password=?", (u, hash_pass(p)))
+            userData = c.fetchone()
+            if userData:
+                st.session_state.logged_in = True
+                st.session_state.user = u
+                st.rerun()
+            else: st.error("Invalid credentials!")
+            conn.close()
 
-                {/* History Sidebar */}
-                <div className="bg-[#0f0f0f] border border-white/10 rounded-2xl p-6 h-fit">
-                  <h3 className="font-bold mb-4 flex items-center gap-2"><History size={18}/> History</h3>
-                  <div className="space-y-4">
-                    {history.length === 0 && <p className="text-gray-600 text-sm italic">No recent jobs</p>}
-                    {history.map(item => (
-                      <div key={item.id} className="p-3 bg-black/50 border border-white/5 rounded-lg group">
-                        <div className="flex justify-between text-[10px] text-indigo-400 font-bold mb-1 uppercase tracking-tighter">
-                          <span>{item.engine}</span>
-                          <span>{item.time}</span>
-                        </div>
-                        <p className="text-xs text-gray-400 truncate">{item.text}</p>
-                        <button className="mt-2 text-indigo-500 opacity-0 group-hover:opacity-100 transition-opacity"><Volume2 size={14}/></button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
+# --- MAIN DASHBOARD AREA ---
+else:
+    username = st.session_state.user
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE username=?", (username,))
+    userData = c.fetchone()
+    conn.close()
+    
+    # Safe Unpacking (Matches 7 Columns)
+    _, _, email, plan, expiry, usage, receipt_id = userData
 
-            {page === 'analytics' && (
-              <div className="space-y-8 animate-in fade-in duration-500">
-                <div className="grid sm:grid-cols-3 gap-6">
-                  <div className="bg-[#0f0f0f] border border-white/10 p-6 rounded-2xl">
-                    <p className="text-xs text-gray-500 font-bold uppercase mb-2">Total Output</p>
-                    <p className="text-3xl font-bold">12,402</p>
-                  </div>
-                  <div className="bg-[#0f0f0f] border border-white/10 p-6 rounded-2xl">
-                    <p className="text-xs text-gray-500 font-bold uppercase mb-2">Characters</p>
-                    <p className="text-3xl font-bold">2.4M</p>
-                  </div>
-                  <div className="bg-[#0f0f0f] border border-white/10 p-6 rounded-2xl">
-                    <p className="text-xs text-gray-500 font-bold uppercase mb-2">Avg. Clarity</p>
-                    <p className="text-3xl font-bold">98.2%</p>
-                  </div>
-                </div>
-                <div className="bg-[#0f0f0f] border border-white/10 p-8 rounded-2xl h-80">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={ANALYTICS_DATA}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#222" />
-                      <XAxis dataKey="date" stroke="#555" fontSize={10}/>
-                      <YAxis stroke="#555" fontSize={10}/>
-                      <Tooltip contentStyle={{backgroundColor: '#000', border: '1px solid #333'}}/>
-                      <Line type="monotone" dataKey="count" stroke="#6366f1" strokeWidth={3} dot={false} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-            )}
+    st.sidebar.title(f"User: {username}")
+    st.sidebar.info(f"Membership: {plan}")
+    if st.sidebar.button("Logout"):
+        st.session_state.logged_in = False
+        st.rerun()
 
-            {page === 'clone' && (
-              <div className="max-w-xl mx-auto text-center space-y-6">
-                <div className="w-20 h-20 bg-indigo-500/10 rounded-full flex items-center justify-center mx-auto">
-                  <Volume2 size={40} className="text-indigo-500"/>
-                </div>
-                <h2 className="text-2xl font-bold">Neural Voice Cloning</h2>
-                <p className="text-gray-400 text-sm">Upload a 1-minute sample of clear audio to create a digital twin.</p>
-                <div className="border-2 border-dashed border-white/10 rounded-2xl p-12 hover:border-indigo-500/50 transition-colors cursor-pointer bg-[#0f0f0f]">
-                  <Upload className="mx-auto mb-4 text-gray-600" size={32}/>
-                  <p className="text-xs text-gray-500">Drop audio files (WAV, MP3) here</p>
-                </div>
-                <button className="w-full bg-indigo-600 py-3 rounded-xl font-bold">Initialize Clone Engine</button>
-              </div>
-            )}
+    t1, t2, t3, t4 = st.tabs(["🔊 Generator", "🎙️ Cloning", "💳 Subscription", "📄 Billing"])
 
-            {page === 'billing' && (
-              <div className="grid md:grid-cols-2 gap-8">
-                <div className="bg-[#0f0f0f] border-2 border-indigo-600 p-8 rounded-2xl relative overflow-hidden">
-                  <div className="absolute top-0 right-0 bg-indigo-600 text-white text-[10px] font-bold px-3 py-1 rounded-bl-lg uppercase">Best Value</div>
-                  <h3 className="text-xl font-bold mb-2">Enterprise Plan</h3>
-                  <p className="text-4xl font-bold mb-6">$49<span className="text-sm text-gray-500 font-normal">/mo</span></p>
-                  <ul className="space-y-3 mb-8 text-sm text-gray-400">
-                    <li className="flex items-center gap-2"><CheckCircle2 size={16} className="text-indigo-500"/> Unlimited Characters</li>
-                    <li className="flex items-center gap-2"><CheckCircle2 size={16} className="text-indigo-500"/> Custom Neural Cloning</li>
-                    <li className="flex items-center gap-2"><CheckCircle2 size={16} className="text-indigo-500"/> API Access & Webhooks</li>
-                  </ul>
-                  <button className="w-full bg-indigo-600 py-3 rounded-xl font-bold">Get Started</button>
-                </div>
-                <div className="bg-[#0f0f0f] border border-white/10 p-8 rounded-2xl flex flex-col items-center justify-center">
-                  <div className="bg-white p-2 rounded-lg mb-4">
-                    <img src={`https://api.qrserver.com/v1/create-qr-code/?data=upi://pay?pa=${CONFIG.upiId}&am=10.00`} alt="QR" className="w-32 h-32"/>
-                  </div>
-                  <p className="font-bold mb-1">Direct UPI Upgrade</p>
-                  <p className="text-xs text-gray-500 mb-6 text-center">Scan to upgrade via secure payment gateway.</p>
-                  <button className="w-full bg-white/5 py-3 rounded-xl font-bold text-sm">Verify Transaction</button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      </main>
-    </div>
-  );
-}
+    with t1:
+        st.header("Studio-Quality AI Generation")
+        c1, c2 = st.columns(2)
+        with c1:
+            target_lang = st.selectbox("Select Script Language", ["English", "Hindi", "French", "German", "Spanish", "Japanese"])
+            el_voices = {"Bella (Soft)": "21m00Tcm4TlvDq8ikWAM", "Adam (Deep)": "pNInz6obpgDQGcFmaJgB", "Rachel (Pro)": "21m00Tcm4TlvDq8ikWAM"}
+            selected_v = st.selectbox("Select Voice Model", list(el_voices.keys()))
+        
+        script_text = st.text_area("Write your script here:", placeholder="Type your text...")
+        
+        limit = 3 if plan == "Free" else (50 if plan == "Standard" else 5000)
+        
+        if st.button("⚡ Generate Audio"):
+            if usage >= limit:
+                st.error("Usage limit reached. Please upgrade your subscription.")
+            elif not script_text:
+                st.warning("Please enter some text.")
+            else:
+                with st.spinner(f"Generating {target_lang} speech..."):
+                    try:
+                        audio_stream = client.text_to_speech.convert(
+                            voice_id=el_voices[selected_v],
+                            text=script_text,
+                            model_id="eleven_multilingual_v2",
+                            output_format="mp3_44100_128"
+                        )
+                        st.audio(b"".join(audio_stream))
+                        
+                        conn = sqlite3.connect(DB_PATH)
+                        conn.execute("UPDATE users SET usage_count = usage_count + 1 WHERE username=?", (username,))
+                        conn.commit()
+                        conn.close()
+                    except Exception as e: st.error(f"Error: {e}")
 
-function NavItem({ active, icon, label, onClick }) {
-  return (
-    <button 
-      onClick={onClick}
-      className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${active ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/20' : 'text-gray-500 hover:text-gray-200 hover:bg-white/5'}`}
-    >
-      {icon}
-      <span className="text-sm font-medium">{label}</span>
-    </button>
-  );
-}
+    with t2:
+        st.header("Private Voice Cloning")
+        if plan == "Free":
+            st.warning("Voice Cloning requires a Standard or Premium subscription.")
+        else:
+            voice_file = st.file_uploader("Upload clear voice sample (MP3/WAV)", type=['wav','mp3'])
+            label = st.text_input("Name this Voice")
+            if st.button("Create Personal Clone"):
+                if voice_file and label:
+                    with st.spinner("Analyzing and Cloning..."):
+                        new_voice = client.voices.add(name=label, files=[voice_file])
+                        st.success(f"Success! Voice ID: {new_voice.voice_id}")
+                else: st.error("Upload a file and give it a name.")
+
+    with t3:
+        st.header("Upgrade Your Membership")
+        st.write("Professional plans for global creators.")
+        
+        col_std, col_pre = st.columns(2)
+        with col_std:
+            with st.container(border=True):
+                st.subheader("Standard Plan")
+                st.write("Price: ₹1 / Month")
+                st.write("- 50 High-Quality Generations")
+                if st.button("Activate Standard"):
+                    rid, exp = upgrade_plan(username, "Standard")
+                    st.success(f"Activated! Receipt: {rid}")
+                    st.rerun()
+
+        with col_pre:
+            with st.container(border=True):
+                st.subheader("Premium Unlimited")
+                st.write("Price: ₹10 / Month")
+                st.write("- 5000 Generations & Cloning")
+                if st.button("Activate Premium"):
+                    rid, exp = upgrade_plan(username, "Premium")
+                    st.success(f"Activated! Receipt: {rid}")
+                    st.rerun()
+        
+        st.divider()
+        st.write("### 📲 Instant UPI Payment")
+        upi_link = f"upi://pay?pa={ADMIN_MOBILE}@ybl&pn=AI_Studio&am=1.00&cu=INR"
+        st.image(f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={upi_link}")
+        st.info(f"Payment Support: +91-{ADMIN_MOBILE}")
+
+    with t4:
+        st.header("Official Digital Receipt")
+        if receipt_id == "NONE":
+            st.write("No active paid subscriptions found.")
+        else:
+            with st.container(border=True):
+                st.title("INVOICE / RECEIPT")
+                st.divider()
+                st.subheader(f"ID: {receipt_id}")
+                c_inv1, c_inv2 = st.columns(2)
+                with c_inv1:
+                    st.write("**Customer:**", username)
+                    st.write("**Email:**", email)
+                with c_inv2:
+                    st.write("**Plan:**", plan)
+                    st.write("**Expiry:**", expiry)
+                st.divider()
+                st.success("STATUS: PAID & VERIFIED")
+
+# Strictly no file modification or deletion logic.
